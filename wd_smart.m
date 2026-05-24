@@ -682,6 +682,46 @@ static void cmdPowerOff(SCSITaskDeviceInterface **dev) {
         fprintf(stderr, "Error: Power off failed. Try 'diskutil eject /dev/diskN' instead.\n");
 }
 
+/// Erase the drive by sending the WD FORMAT DISK vendor command (0xC4).
+/// This is IRREVERSIBLE. Requires --confirm flag and shows a countdown.
+static void cmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
+    // Require explicit --confirm flag
+    BOOL confirmed = NO;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--confirm") == 0) confirmed = YES;
+    }
+
+    if (!confirmed) {
+        fprintf(stderr,
+            "WARNING: This will PERMANENTLY ERASE ALL DATA on the drive.\n"
+            "         This operation is IRREVERSIBLE.\n\n"
+            "To proceed, run:\n"
+            "  sudo wd_smart erase --confirm\n");
+        return;
+    }
+
+    // 5-second countdown giving the user a chance to Ctrl-C
+    fprintf(stderr, "*** ALL DATA WILL BE DESTROYED ***\n");
+    fprintf(stderr, "Press Ctrl-C to cancel.\n\n");
+    for (int i = 5; i > 0; i--) {
+        fprintf(stderr, "  Erasing in %d...\n", i);
+        sleep(1);
+    }
+
+    // WD vendor-specific FORMAT DISK command (opcode 0xC4)
+    SCSICommandDescriptorBlock cdb = {0};
+    cdb[0] = 0xC4;  // FORMAT DISK (WD vendor-specific)
+
+    int r = execSCSITask(dev, cdb, kSCSICDBSize_10Byte, NULL, 0,
+                         kSCSIDataTransfer_NoDataTransfer, kTimeoutLong);
+
+    if (r == 0)
+        printf("Erase command sent. Drive is formatting.\n"
+               "This may take a long time. Do not disconnect the drive.\n");
+    else
+        fprintf(stderr, "Error: Erase command failed (%d)\n", r);
+}
+
 // ---------------------------------------------------------------------------
 // MARK: - Main
 // ---------------------------------------------------------------------------
@@ -700,6 +740,7 @@ static void usage(void) {
         "  temp           Show drive temperature and fan status\n"
         "  sleep [MIN]    Get or set sleep timer (0 = disable)\n"
         "  power-off      Safely spin down and power off drive\n"
+        "  erase          Erase all data (requires --confirm)\n"
         "\n"
         "Requires: sudo (root access needed for IOKit SCSI commands)\n"
     );
@@ -722,6 +763,7 @@ int main(int argc, const char *argv[]) {
             return 1;
         }
         printf("Device: %s\n\n", deviceName);
+        fflush(stdout);
 
         // Dispatch command
         if      (strcmp(cmd, "smart") == 0)      cmdSmart(dev);
@@ -733,6 +775,7 @@ int main(int argc, const char *argv[]) {
         else if (strcmp(cmd, "temp") == 0)       cmdTemp(dev);
         else if (strcmp(cmd, "sleep") == 0)      cmdSleep(dev, argc > 2 ? argv[2] : NULL);
         else if (strcmp(cmd, "power-off") == 0)  cmdPowerOff(dev);
+        else if (strcmp(cmd, "erase") == 0)     cmdErase(dev, argc, argv);
         else {
             fprintf(stderr, "Unknown command: %s\n\n", cmd);
             usage();
