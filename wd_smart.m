@@ -195,10 +195,13 @@ static int scsiReceiveDiagnostic(SCSITaskDeviceInterface **dev, UInt8 page, void
 }
 
 /// SEND DIAGNOSTIC (opcode 0x1D) — initiates a self-test.
+/// Note: WD SES devices require the self-test code in bits 7:5 but reject
+/// the standard SelfTest bit (bit 2). This is non-standard but matches the
+/// behavior of WD Drive Utilities.
 static int scsiSendDiagnosticSelfTest(SCSITaskDeviceInterface **dev, UInt8 testCode) {
     SCSICommandDescriptorBlock cdb = {0};
     cdb[0] = 0x1D;                    // SEND DIAGNOSTIC
-    cdb[1] = (testCode << 5) | 0x04;  // self-test code in bits 7:5, SelfTest bit
+    cdb[1] = (testCode << 5);         // self-test code in bits 7:5, NO SelfTest bit
     return execSCSITask(dev, cdb, kSCSICDBSize_6Byte, NULL, 0,
                         kSCSIDataTransfer_NoDataTransfer, kTimeoutLong);
 }
