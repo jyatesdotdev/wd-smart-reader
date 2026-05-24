@@ -32,7 +32,29 @@ Expected behavior. The SES page 0x84 status word (`0xC24F` etc.) uses a differen
 
 ## Self-test shows "In progress..." but I didn't start one
 
-The self-test log entry at position 0 shows the most recent or currently running test. If the hours field is 0 and no test was started, this may be a stale entry from the factory. Run `short-test` and then `status` to see fresh results.
+The self-test log entry at position 0 shows the most recent or currently running test. If the hours field is 0 and no test was started, this may be a stale entry from a previous test or from the factory. The WD SES bridge doesn't always clear log entries properly. Run a short-test and then check status to see fresh results.
+
+## Self-test won't start / "Could not start test"
+
+If the drive recently woke from sleep or was power-cycled, the diagnostic subsystem may need a moment. Try:
+1. Wait 30 seconds after the drive mounts
+2. Run `abort-test` first to clear any stale state
+3. Retry the test
+
+If it still fails, the drive may need a full power cycle (eject + unplug + replug).
+
+## Mac went to sleep and aborted the test
+
+Use `caffeinate` to prevent sleep during long tests:
+```bash
+caffeinate -s &
+sudo ./wd_smart long-test
+```
+Kill caffeinate when done: `killall caffeinate`
+
+## WD Drive Utilities GUI aborts CLI-initiated tests
+
+The GUI claims exclusive access to the SES device when opened, which can interrupt a running test. Keep the GUI closed while running tests from the CLI.
 
 ## "Could not read self-test log" 
 

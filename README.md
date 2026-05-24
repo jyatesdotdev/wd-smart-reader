@@ -2,9 +2,23 @@
 
 A macOS command-line tool that reads SMART data and runs diagnostics on Western Digital external drives (MyBook, Elements, etc.) through the WD USB bridge enclosure.
 
-## Why
+## Why This Exists
 
-WD external drives use a proprietary USB-SATA bridge that blocks standard SMART passthrough. Tools like `smartctl` cannot access these drives. This tool sends SCSI diagnostic commands through the SES (SCSI Enclosure Services) interface — the same approach WD Drive Utilities uses internally.
+WD external drives (MyBook, Elements, EasyStore) use a proprietary USB-SATA bridge that blocks standard SMART passthrough. Every existing tool fails on these enclosures:
+
+- **smartctl** — returns "Operation not supported by device" on WD USB bridges
+- **[OS-X-SAT-SMART-Driver](https://github.com/kasbert/OS-X-SAT-SMART-Driver)** (642★) — a macOS kernel extension (kext) for SAT passthrough. Last updated December 2016. Requires unsigned kext loading, which is impossible on Apple Silicon Macs (M1+). Its README explicitly states it is "not compatible to WD Drive Manager, or enclosures with custom kernel extensions."
+- **[wdpassport-utils](https://github.com/KenMacD/wdpassport-utils)** — Linux-only Python tool for WD Passport encryption/unlock. No SMART support.
+- **[Seagate/openSeaChest](https://github.com/Seagate/openSeaChest)** (718★) — cross-platform drive utility. Cannot communicate through WD's proprietary USB bridge on macOS.
+- **[wdepc](https://github.com/tyan-boot/wdepc)** — WD Extended Power Condition tool. Power management only, no SMART.
+
+This tool takes a different approach: instead of trying to pass ATA commands through the bridge (which WD blocks), it talks to the bridge's **SES (SCSI Enclosure Services)** management interface using vendor-specific SCSI diagnostic pages — the same protocol WD Drive Utilities uses internally.
+
+The result is a pure userspace CLI tool that:
+- Works on Apple Silicon (no kext required)
+- Requires no third-party dependencies
+- Provides SMART data, self-tests, temperature, drive info, sleep timer, and erase
+- Runs on any modern macOS version
 
 ## Dependencies
 

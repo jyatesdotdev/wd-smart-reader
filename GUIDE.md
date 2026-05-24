@@ -53,7 +53,14 @@ sudo ./wd_smart long-test
 ```
 Full surface scan. On an 18TB drive, expect 20-30+ hours. The drive remains usable during the test but performance may be reduced.
 
-### Checking Progress
+### Important Notes
+
+- **Keep your Mac awake** during extended tests. Use `caffeinate -s &` in a separate terminal to prevent sleep, which will abort the test.
+- **Don't open WD Drive Utilities** while a CLI-initiated test is running — the GUI may abort it by claiming the SES device.
+- **Progress percentage** is not available through the SES interface. The tool can only report running/completed/failed status.
+- The self-test log's "hours" field may show 0 — this is a bridge firmware limitation that doesn't populate the field when tunneling through SES.
+
+### Checking Results
 ```bash
 sudo ./wd_smart status
 ```
