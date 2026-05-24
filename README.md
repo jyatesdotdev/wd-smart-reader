@@ -39,7 +39,8 @@ sudo ./wd_smart [command]
 | `temp` | Show drive temperature |
 | `sleep [MIN]` | Get or set sleep timer (0 = disable) |
 | `power-off` | Safely spin down and power off drive |
-| `erase` | Erase all data (requires `--confirm`) |
+| `erase` | Quick format via WD bridge (requires `--confirm`) |
+| `secure-erase` | Zero-fill every sector (requires `--confirm`) |
 
 ### Examples
 
@@ -52,7 +53,8 @@ sudo ./wd_smart temp           # current drive temperature
 sudo ./wd_smart sleep 30       # spin down after 30 min idle
 sudo ./wd_smart sleep 0        # disable sleep timer
 sudo ./wd_smart power-off      # safe eject / power off
-sudo ./wd_smart erase --confirm  # WIPE ALL DATA (irreversible!)
+sudo ./wd_smart erase --confirm        # quick format (bridge-level)
+sudo ./wd_smart secure-erase --confirm # full zero-fill (20+ hrs on 18TB)
 ```
 
 ## Install (optional)

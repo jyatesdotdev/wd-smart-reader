@@ -18,6 +18,10 @@
 #import <IOKit/IOKitLib.h>
 #import <IOKit/IOCFPlugIn.h>
 #import <IOKit/scsi/SCSITaskLib.h>
+#import <sys/disk.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <math.h>
 
 // ---------------------------------------------------------------------------
 // MARK: - Constants
@@ -722,6 +726,177 @@ static void cmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]
         fprintf(stderr, "Error: Erase command failed (%d)\n", r);
 }
 
+/// Find the BSD name (e.g. "disk12") of the WD disk LUN (not the SES device).
+static NSString *findWDDiskBSDName(void) {
+    io_iterator_t iter;
+    io_service_t service;
+
+    CFMutableDictionaryRef match = IOServiceMatching("IOSCSIPeripheralDeviceNub");
+    kern_return_t kr = IOServiceGetMatchingServices(kIOMainPortDefault, match, &iter);
+    if (kr != KERN_SUCCESS) return nil;
+
+    while ((service = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
+        CFTypeRef vendorRef = IORegistryEntrySearchCFProperty(
+            service, kIOServicePlane, CFSTR("Vendor Identification"),
+            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+        CFTypeRef productRef = IORegistryEntrySearchCFProperty(
+            service, kIOServicePlane, CFSTR("Product Identification"),
+            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+
+        NSString *vendor = vendorRef ? (__bridge_transfer NSString *)vendorRef : nil;
+        NSString *product = productRef ? (__bridge_transfer NSString *)productRef : nil;
+        if (!vendor) { IOObjectRelease(service); continue; }
+
+        NSString *tv = [vendor stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (![tv isEqualToString:@"WD"] && ![tv isEqualToString:@"WDC"]) {
+            IOObjectRelease(service); continue;
+        }
+
+        // Skip the SES device — we want the actual disk LUN
+        NSString *tp = product
+            ? [product stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]
+            : @"";
+        if ([tp containsString:@"SES"]) { IOObjectRelease(service); continue; }
+
+        // Walk children to find the whole-disk IOMedia node
+        io_iterator_t childIter;
+        kr = IORegistryEntryCreateIterator(service, kIOServicePlane,
+            kIORegistryIterateRecursively, &childIter);
+        IOObjectRelease(service);
+        if (kr != KERN_SUCCESS) continue;
+
+        io_service_t child;
+        while ((child = IOIteratorNext(childIter)) != IO_OBJECT_NULL) {
+            io_name_t className;
+            IOObjectGetClass(child, className);
+            if (strcmp(className, "IOMedia") == 0) {
+                CFTypeRef wholeRef = IORegistryEntryCreateCFProperty(
+                    child, CFSTR("Whole"), kCFAllocatorDefault, 0);
+                if (wholeRef && CFBooleanGetValue(wholeRef)) {
+                    CFTypeRef bsdRef = IORegistryEntryCreateCFProperty(
+                        child, CFSTR("BSD Name"), kCFAllocatorDefault, 0);
+                    if (bsdRef) {
+                        NSString *bsd = (__bridge_transfer NSString *)bsdRef;
+                        CFRelease(wholeRef);
+                        IOObjectRelease(child);
+                        IOObjectRelease(childIter);
+                        IOObjectRelease(iter);
+                        return bsd;
+                    }
+                }
+                if (wholeRef) CFRelease(wholeRef);
+            }
+            IOObjectRelease(child);
+        }
+        IOObjectRelease(childIter);
+    }
+    IOObjectRelease(iter);
+    return nil;
+}
+
+/// Secure erase: overwrite every sector with zeros.
+/// This is a full single-pass zero-fill — every byte on disk becomes 0x00.
+/// Requires --confirm and gives a 10-second countdown before starting.
+static void cmdSecureErase(int argc, const char *argv[]) {
+    BOOL confirmed = NO;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--confirm") == 0) confirmed = YES;
+    }
+
+    if (!confirmed) {
+        fprintf(stderr,
+            "WARNING: SECURE ERASE writes zeros to EVERY SECTOR on the drive.\n"
+            "         This is IRREVERSIBLE and will take 20+ hours on 18TB.\n\n"
+            "To proceed, run:\n"
+            "  sudo wd_smart secure-erase --confirm\n");
+        return;
+    }
+
+    // Find the WD disk's BSD name
+    NSString *bsdName = findWDDiskBSDName();
+    if (!bsdName) {
+        fprintf(stderr, "Error: Could not find WD disk device\n");
+        return;
+    }
+
+    printf("Target: /dev/%s\n\n", [bsdName UTF8String]);
+
+    // 10-second countdown (longer due to severity)
+    fprintf(stderr, "*** SECURE ERASE: EVERY BYTE WILL BE OVERWRITTEN WITH ZEROS ***\n");
+    fprintf(stderr, "*** This will take many hours. Press Ctrl-C to cancel. ***\n\n");
+    for (int i = 10; i > 0; i--) {
+        fprintf(stderr, "  Starting in %d...\n", i);
+        sleep(1);
+    }
+
+    // Unmount all volumes
+    NSString *unmountCmd = [NSString stringWithFormat:@"diskutil unmountDisk /dev/%@", bsdName];
+    if (system([unmountCmd UTF8String]) != 0) {
+        fprintf(stderr, "Error: Could not unmount disk. Aborting.\n");
+        return;
+    }
+
+    // Open raw character device for writing
+    NSString *rawPath = [NSString stringWithFormat:@"/dev/r%@", bsdName];
+    int fd = open([rawPath UTF8String], O_WRONLY);
+    if (fd < 0) {
+        fprintf(stderr, "Error: Could not open %s: %s\n",
+                [rawPath UTF8String], strerror(errno));
+        return;
+    }
+
+    // Get device size via ioctl
+    UInt64 blockCount = 0;
+    UInt32 blockSize = 512;
+    ioctl(fd, DKIOCGETBLOCKCOUNT, &blockCount);
+    ioctl(fd, DKIOCGETBLOCKSIZE, &blockSize);
+    UInt64 deviceSize = blockCount * blockSize;
+
+    // Write zeros in 1MB chunks with progress reporting
+    const size_t chunkSize = 1024 * 1024;
+    void *zeros = calloc(1, chunkSize);
+    if (!zeros) { close(fd); fprintf(stderr, "Error: Out of memory\n"); return; }
+
+    UInt64 written = 0;
+    time_t startTime = time(NULL);
+    time_t lastReport = 0;
+    ssize_t n;
+
+    printf("\nSecure erase in progress...\n");
+
+    while ((n = write(fd, zeros, chunkSize)) > 0) {
+        written += n;
+
+        time_t now = time(NULL);
+        if (now - lastReport >= 5) {
+            lastReport = now;
+            double elapsed = difftime(now, startTime);
+            double speed = (elapsed > 0) ? (double)written / elapsed / 1e6 : 0;
+
+            if (deviceSize > 0) {
+                double pct = (double)written / deviceSize * 100.0;
+                double etaSec = (speed > 0) ? (double)(deviceSize - written) / (speed * 1e6) : 0;
+                printf("\r  %5.1f%%  |  %.1f MB/s  |  ~%.0fh %02.0fm remaining    ",
+                       pct, speed, etaSec / 3600, fmod(etaSec, 3600) / 60);
+            } else {
+                printf("\r  %.2f GB written  |  %.1f MB/s    ",
+                       (double)written / 1e9, speed);
+            }
+            fflush(stdout);
+        }
+    }
+
+    free(zeros);
+    close(fd);
+
+    double elapsed = difftime(time(NULL), startTime);
+    printf("\n\nSecure erase complete.\n");
+    printf("  Written: %.2f TB\n", (double)written / 1e12);
+    printf("  Time:    %.1f hours\n", elapsed / 3600.0);
+    if (elapsed > 0)
+        printf("  Speed:   %.1f MB/s average\n", (double)written / elapsed / 1e6);
+}
+
 // ---------------------------------------------------------------------------
 // MARK: - Main
 // ---------------------------------------------------------------------------
@@ -740,7 +915,8 @@ static void usage(void) {
         "  temp           Show drive temperature and fan status\n"
         "  sleep [MIN]    Get or set sleep timer (0 = disable)\n"
         "  power-off      Safely spin down and power off drive\n"
-        "  erase          Erase all data (requires --confirm)\n"
+        "  erase          Quick format via WD bridge (requires --confirm)\n"
+        "  secure-erase   Zero-fill every sector (requires --confirm)\n"
         "\n"
         "Requires: sudo (root access needed for IOKit SCSI commands)\n"
     );
@@ -776,6 +952,11 @@ int main(int argc, const char *argv[]) {
         else if (strcmp(cmd, "sleep") == 0)      cmdSleep(dev, argc > 2 ? argv[2] : NULL);
         else if (strcmp(cmd, "power-off") == 0)  cmdPowerOff(dev);
         else if (strcmp(cmd, "erase") == 0)     cmdErase(dev, argc, argv);
+        else if (strcmp(cmd, "secure-erase") == 0) {
+            closeWDDevice(dev);  // release SES before accessing disk LUN
+            cmdSecureErase(argc, argv);
+            return 0;
+        }
         else {
             fprintf(stderr, "Unknown command: %s\n\n", cmd);
             usage();
