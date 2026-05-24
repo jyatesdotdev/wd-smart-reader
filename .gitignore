@@ -1,0 +1,4 @@
+wd_smart
+*.o
+*.dSYM/
+.DS_Store
