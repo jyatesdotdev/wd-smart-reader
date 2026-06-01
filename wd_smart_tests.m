@@ -1,13 +1,9 @@
 #import <XCTest/XCTest.h>
-#import <CommonCrypto/CommonDigest.h>
 #import <objc/runtime.h>
 
 #define TESTING 1
+#import "src/WDSmart.h"
 
-// Include the source with main renamed
-#define main wd_smart_main
-#include "wd_smart.m"
-#undef main
 
 // =============================================================================
 // MARK: - Mock SCSI Device Emulator
@@ -234,7 +230,7 @@ static int mockExecSCSI(void *ctx,
     }
 }
 
-static DriveIdentity mockDriveIdentity(const char *targetSerial);
+static WDDriveIdentity mockDriveIdentity(const char *targetSerial);
 
 static void installMock(void) {
     mockReset();
@@ -244,14 +240,14 @@ static void installMock(void) {
 }
 
 static void uninstallMock(void) {
-    g_scsiExec = execSCSITaskReal;
+    g_scsiExec = WDExecSCSITaskReal;
     g_scsiCtx = NULL;
-    g_driveIdentity = driveIdentityFromIOKit;
+    g_driveIdentity = WDDriveIdentityFromIOKit;
 }
 
-static DriveIdentity mockDriveIdentity(const char *targetSerial) {
+static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     (void)targetSerial;
-    DriveIdentity ident = {0};
+    WDDriveIdentity ident = {0};
     strlcpy(ident.vendor, "WD", sizeof(ident.vendor));
     strlcpy(ident.product, "My Book 25ED", sizeof(ident.product));
     strlcpy(ident.firmware, "1031", sizeof(ident.firmware));
@@ -275,7 +271,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testCookPasswordCorrectHash {
     UInt8 cooked[32] = {0};
-    XCTAssertEqual(cookPassword(NULL, "test123", cooked), 0);
+    XCTAssertEqual(WDCookPassword(NULL, "test123", cooked), 0);
     UInt8 expected[] = {0xDF,0x87,0x01,0xD1,0xE5,0xD3,0xD6,0xD4,
                         0x41,0x8F,0x90,0xD6,0x29,0x3C,0xE4,0x03,
                         0x1D,0xBB,0x56,0x93,0x6E,0x57,0x73,0xDE,
@@ -286,7 +282,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 - (void)testCookPasswordInitializesIterations {
     g_mock.handyStore[8] = 0; g_mock.handyStore[9] = 0;
     UInt8 cooked[32];
-    cookPassword(NULL, "x", cooked);
+    WDCookPassword(NULL, "x", cooked);
     XCTAssertEqual(g_mock.handyStore[8] | (g_mock.handyStore[9]<<8), 1000);
     UInt8 sum = 0;
     for (int i = 0; i < 512; i++) sum += g_mock.handyStore[i];
@@ -295,8 +291,8 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testCookPasswordDifferentInputsDifferentOutputs {
     UInt8 c1[32], c2[32];
-    cookPassword(NULL, "aaa", c1);
-    cookPassword(NULL, "bbb", c2);
+    WDCookPassword(NULL, "aaa", c1);
+    WDCookPassword(NULL, "bbb", c2);
     XCTAssertNotEqual(memcmp(c1, c2, 32), 0);
 }
 
@@ -304,14 +300,14 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testSetPasswordArms {
     const char *argv[] = {"wd_smart", "set-password", "test123"};
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     XCTAssertEqual(g_mock.securityState, 0x02);
     XCTAssertTrue(g_mock.passwordSet);
 }
 
 - (void)testSetPasswordCDBFormat {
     const char *argv[] = {"wd_smart", "set-password", "pw"};
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     MockSCSIRecord *r = NULL;
     for (int i = 0; i < g_mock.recordCount; i++)
         if (g_mock.records[i].opcode == 0xC1 && g_mock.records[i].subcode == 0xE2)
@@ -325,21 +321,21 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testSetPasswordRejectsMissing {
     const char *argv[] = {"wd_smart", "set-password"};
-    cmdSetPassword(NULL, 2, argv, 1);
+    WDCmdSetPassword(NULL, 2, argv, 1);
     XCTAssertEqual(g_mock.securityState, 0x00);
 }
 
 - (void)testSetPasswordRejectsTooLong {
     const char *argv[] = {"wd_smart", "set-password", "123456789012345678901234567890123"}; // 33 chars
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     XCTAssertEqual(g_mock.securityState, 0x00);
 }
 
 - (void)testSetPasswordFailsWhenAlreadyArmed {
     const char *argv[] = {"wd_smart", "set-password", "first"};
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     const char *argv2[] = {"wd_smart", "set-password", "second"};
-    cmdSetPassword(NULL, 3, argv2, 1);
+    WDCmdSetPassword(NULL, 3, argv2, 1);
     // First password should still be active
     XCTAssertEqual(g_mock.securityState, 0x02);
 }
@@ -348,29 +344,29 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testUnlockCorrectPassword {
     const char *argv[] = {"wd_smart", "set-password", "mypass"};
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     g_mock.securityState = 0x01; // simulate power cycle
     const char *uargv[] = {"wd_smart", "unlock", "mypass"};
-    cmdUnlock(NULL, 3, uargv, 1);
+    WDCmdUnlock(NULL, 3, uargv, 1);
     XCTAssertEqual(g_mock.securityState, 0x02);
 }
 
 - (void)testUnlockWrongPassword {
     const char *argv[] = {"wd_smart", "set-password", "right"};
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     g_mock.securityState = 0x01;
     const char *uargv[] = {"wd_smart", "unlock", "wrong"};
-    cmdUnlock(NULL, 3, uargv, 1);
+    WDCmdUnlock(NULL, 3, uargv, 1);
     XCTAssertEqual(g_mock.securityState, 0x01); // still locked
 }
 
 - (void)testUnlockPasswordAtOffset0x08 {
     const char *argv[] = {"wd_smart", "set-password", "t"};
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     g_mock.securityState = 0x01;
     g_mock.recordCount = 0;
     const char *uargv[] = {"wd_smart", "unlock", "t"};
-    cmdUnlock(NULL, 3, uargv, 1);
+    WDCmdUnlock(NULL, 3, uargv, 1);
     MockSCSIRecord *r = NULL;
     for (int i = 0; i < g_mock.recordCount; i++)
         if (g_mock.records[i].opcode == 0xC1 && g_mock.records[i].subcode == 0xE1)
@@ -381,7 +377,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testUnlockFailsWhenNotLocked {
     const char *argv[] = {"wd_smart", "unlock", "x"};
-    cmdUnlock(NULL, 3, argv, 1);
+    WDCmdUnlock(NULL, 3, argv, 1);
     XCTAssertEqual(g_mock.securityState, 0x00);
 }
 
@@ -389,27 +385,27 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testRemovePasswordCorrect {
     const char *argv[] = {"wd_smart", "set-password", "secret"};
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     const char *rargv[] = {"wd_smart", "remove-password", "secret"};
-    cmdRemovePassword(NULL, 3, rargv, 1);
+    WDCmdRemovePassword(NULL, 3, rargv, 1);
     XCTAssertEqual(g_mock.securityState, 0x00);
     XCTAssertFalse(g_mock.passwordSet);
 }
 
 - (void)testRemovePasswordWrong {
     const char *argv[] = {"wd_smart", "set-password", "correct"};
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     const char *rargv[] = {"wd_smart", "remove-password", "incorrect"};
-    cmdRemovePassword(NULL, 3, rargv, 1);
+    WDCmdRemovePassword(NULL, 3, rargv, 1);
     XCTAssertEqual(g_mock.securityState, 0x02); // still armed
 }
 
 - (void)testRemovePasswordAtOffset0x08WithFlag0x10 {
     const char *argv[] = {"wd_smart", "set-password", "p"};
-    cmdSetPassword(NULL, 3, argv, 1);
+    WDCmdSetPassword(NULL, 3, argv, 1);
     g_mock.recordCount = 0;
     const char *rargv[] = {"wd_smart", "remove-password", "p"};
-    cmdRemovePassword(NULL, 3, rargv, 1);
+    WDCmdRemovePassword(NULL, 3, rargv, 1);
     MockSCSIRecord *r = NULL;
     for (int i = 0; i < g_mock.recordCount; i++)
         if (g_mock.records[i].opcode == 0xC1 && g_mock.records[i].subcode == 0xE2
@@ -423,14 +419,14 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testResetDEKRequiresConfirm {
     const char *argv[] = {"wd_smart", "reset-dek"};
-    cmdResetDEK(NULL, 2, argv);
+    WDCmdResetDEK(NULL, 2, argv);
     XCTAssertEqual(g_mock.recordCount, 0, @"Should not send commands without --confirm");
 }
 
 - (void)testResetDEKSendsKRE {
     g_mock.securityState = 0x02; g_mock.passwordSet = YES;
     const char *argv[] = {"wd_smart", "reset-dek", "--confirm"};
-    cmdResetDEK(NULL, 3, argv);
+    WDCmdResetDEK(NULL, 3, argv);
     BOOL sentReset = NO;
     for (int i = 0; i < g_mock.recordCount; i++) {
         if (g_mock.records[i].opcode == 0xC1 && g_mock.records[i].subcode == 0xE3) {
@@ -449,17 +445,17 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testFullRoundTrip {
     const char *s[] = {"wd_smart", "set-password", "hello"};
-    cmdSetPassword(NULL, 3, s, 1);
+    WDCmdSetPassword(NULL, 3, s, 1);
     XCTAssertEqual(g_mock.securityState, 0x02);
 
     g_mock.securityState = 0x01; // power cycle
 
     const char *u[] = {"wd_smart", "unlock", "hello"};
-    cmdUnlock(NULL, 3, u, 1);
+    WDCmdUnlock(NULL, 3, u, 1);
     XCTAssertEqual(g_mock.securityState, 0x02);
 
     const char *r[] = {"wd_smart", "remove-password", "hello"};
-    cmdRemovePassword(NULL, 3, r, 1);
+    WDCmdRemovePassword(NULL, 3, r, 1);
     XCTAssertEqual(g_mock.securityState, 0x00);
 }
 
@@ -468,36 +464,36 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 - (void)testSmartRawValue48Bit {
     WDSmartAttribute attr = {0};
     attr.raw[0]=1; attr.raw[1]=2; attr.raw[2]=3; attr.raw[3]=4; attr.raw[4]=5; attr.raw[5]=6;
-    XCTAssertEqual(smartRawValue(&attr), 0x060504030201ULL);
+    XCTAssertEqual(WDSmartRawValue(&attr), 0x060504030201ULL);
 }
 
 - (void)testSmartFormatTemp {
     WDSmartAttribute attr = {0};
     attr.id = 194; attr.raw[0] = 35; attr.raw[1] = 20; attr.raw[4] = 50;
-    XCTAssert(strstr(smartRawFormatted(&attr), "35"));
+    XCTAssert(strstr(WDSmartRawFormatted(&attr), "35"));
 }
 
 - (void)testSmartFormatHours {
     WDSmartAttribute attr = {0};
     attr.id = 9; attr.raw[0] = 0xD2; attr.raw[1] = 0x04;
-    const char *s = smartRawFormatted(&attr);
+    const char *s = WDSmartRawFormatted(&attr);
     XCTAssert(strstr(s, "1234") && strstr(s, "51d"));
 }
 
 - (void)testSmartFormatSpinUp {
     WDSmartAttribute attr = {0};
     attr.id = 3; attr.raw[0] = 0xE8; attr.raw[1] = 0x03; attr.raw[2] = 0xD0; attr.raw[3] = 0x07;
-    XCTAssert(strstr(smartRawFormatted(&attr), "1000") && strstr(smartRawFormatted(&attr), "2000"));
+    XCTAssert(strstr(WDSmartRawFormatted(&attr), "1000") && strstr(WDSmartRawFormatted(&attr), "2000"));
 }
 
 - (void)testSelfTestResultStrings {
-    XCTAssert(strcmp(selfTestResultString(0), "Completed OK") == 0);
-    XCTAssert(strcmp(selfTestResultString(15), "In progress...") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(0), "Completed OK") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(15), "In progress...") == 0);
 }
 
 - (void)testSmartAttrName {
-    XCTAssert(strcmp(smartAttrName(9), "Power-On Hours") == 0);
-    XCTAssert(strcmp(smartAttrName(255), "Vendor Specific") == 0);
+    XCTAssert(strcmp(WDSmartAttrName(9), "Power-On Hours") == 0);
+    XCTAssert(strcmp(WDSmartAttrName(255), "Vendor Specific") == 0);
 }
 
 - (void)testHandyStoreChecksum {
@@ -515,7 +511,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
 
-    cmdSmart(NULL);
+    WDCmdSmart(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "PASSED") != NULL, @"Should show SMART PASSED");
@@ -531,7 +527,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdSmart(NULL);
+    WDCmdSmart(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "FAILED") != NULL);
@@ -544,7 +540,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdStatus(NULL);
+    WDCmdStatus(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "Short") != NULL, @"Should show test type");
@@ -558,7 +554,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdStatus(NULL);
+    WDCmdStatus(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "No self-test results") != NULL);
@@ -571,7 +567,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdTemp(NULL);
+    WDCmdTemp(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "35") != NULL, @"Should show 35°C from attr 194");
@@ -585,7 +581,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdTemp(NULL);
+    WDCmdTemp(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "35") != NULL);
@@ -598,7 +594,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdSleep(NULL, NULL);
+    WDCmdSleep(NULL, NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "10 minutes") != NULL, @"Should show 10 min timer");
@@ -612,7 +608,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdSleep(NULL, NULL);
+    WDCmdSleep(NULL, NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "disabled") != NULL);
@@ -625,7 +621,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdSleep(NULL, "20");
+    WDCmdSleep(NULL, "20");
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "20 minutes") != NULL);
@@ -640,7 +636,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdSleep(NULL, "0");
+    WDCmdSleep(NULL, "0");
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "disabled") != NULL);
@@ -658,7 +654,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdShortTest(NULL);
+    WDCmdShortTest(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "Short self-test started") != NULL);
@@ -676,7 +672,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdLongTest(NULL);
+    WDCmdLongTest(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "Extended self-test started") != NULL);
@@ -689,7 +685,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdAbortTest(NULL);
+    WDCmdAbortTest(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "aborted") != NULL);
@@ -704,7 +700,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdPowerOff(NULL);
+    WDCmdPowerOff(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "powered off") != NULL);
@@ -720,7 +716,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
 - (void)testCmdEraseRequiresConfirm {
     const char *argv[] = {"wd_smart", "erase"};
     g_mock.recordCount = 0;
-    cmdErase(NULL, 2, argv);
+    WDCmdErase(NULL, 2, argv);
     // Should NOT have sent format command
     BOOL found = NO;
     for (int i = 0; i < g_mock.recordCount; i++)
@@ -736,7 +732,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdErase(NULL, 3, argv);
+    WDCmdErase(NULL, 3, argv);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "Erase command sent") != NULL);
@@ -753,7 +749,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    printDriveIdentity(NULL);
+    WDPrintDriveIdentity(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "WD") != NULL, @"Should show vendor");
@@ -766,7 +762,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdInfo(NULL);
+    WDCmdInfo(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "My Book 25ED") != NULL, @"Should show product from identity");
@@ -784,7 +780,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdInfo(NULL);
+    WDCmdInfo(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "Locked") != NULL);
@@ -795,7 +791,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdInfo(NULL);
+    WDCmdInfo(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "3.5") != NULL, @"Should show form factor");
@@ -806,7 +802,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdInfo(NULL);
+    WDCmdInfo(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "TB") != NULL, @"Should show capacity in TB");
@@ -817,7 +813,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdInfo(NULL);
+    WDCmdInfo(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "USB3.0") != NULL, @"Should show USB interface");
@@ -829,24 +825,24 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     const char *argv[] = {"wd_smart", "secure-erase"};
     // Should print warning and not proceed (findWDDiskBSDName will return nil in mock)
     // We just verify it doesn't crash
-    cmdSecureErase(2, argv);
+    WDCmdSecureErase(2, argv);
 }
 
 // MARK: - Self-Test Result String Coverage
 
 - (void)testAllSelfTestResultCodes {
-    XCTAssert(strcmp(selfTestResultString(0), "Completed OK") == 0);
-    XCTAssert(strcmp(selfTestResultString(1), "Aborted (self)") == 0);
-    XCTAssert(strcmp(selfTestResultString(2), "Aborted (user)") == 0);
-    XCTAssert(strcmp(selfTestResultString(3), "Unknown error") == 0);
-    XCTAssert(strcmp(selfTestResultString(4), "Unknown element") == 0);
-    XCTAssert(strcmp(selfTestResultString(5), "Electrical fail") == 0);
-    XCTAssert(strcmp(selfTestResultString(6), "Servo fail") == 0);
-    XCTAssert(strcmp(selfTestResultString(7), "Read fail") == 0);
-    XCTAssert(strcmp(selfTestResultString(8), "Handling damage") == 0);
-    XCTAssert(strcmp(selfTestResultString(15), "In progress...") == 0);
-    XCTAssert(strcmp(selfTestResultString(9), "Reserved") == 0);
-    XCTAssert(strcmp(selfTestResultString(14), "Reserved") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(0), "Completed OK") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(1), "Aborted (self)") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(2), "Aborted (user)") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(3), "Unknown error") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(4), "Unknown element") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(5), "Electrical fail") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(6), "Servo fail") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(7), "Read fail") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(8), "Handling damage") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(15), "In progress...") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(9), "Reserved") == 0);
+    XCTAssert(strcmp(WDSelfTestResultString(14), "Reserved") == 0);
 }
 
 // MARK: - Self-Test Log with Failure Entry
@@ -865,7 +861,7 @@ static DriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout);
     FILE *old = stdout;
     stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    cmdStatus(NULL);
+    WDCmdStatus(NULL);
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "Read fail") != NULL);
