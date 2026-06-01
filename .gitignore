@@ -1,4 +1,6 @@
 wd_smart
-*.o
-*.dSYM/
+wd_smart_tests
+wd_smart_tests_cov
+*.profraw
+*.profdata
 .DS_Store

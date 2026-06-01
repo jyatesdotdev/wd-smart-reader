@@ -22,6 +22,7 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <math.h>
+#import <CommonCrypto/CommonDigest.h>
 
 // ---------------------------------------------------------------------------
 // MARK: - Constants
@@ -143,15 +144,25 @@ static const char *smartAttrName(UInt8 id) {
 // MARK: - Low-Level SCSI Transport
 // ---------------------------------------------------------------------------
 
-/// Execute a SCSI task with the given CDB, returning 0 on success.
-/// Handles task creation, scatter-gather setup, execution, and cleanup.
-static int execSCSITask(SCSITaskDeviceInterface **dev,
-                        SCSICommandDescriptorBlock cdb,
-                        UInt8 cdbSize,
-                        void *buffer,
-                        UInt32 bufferSize,
-                        UInt8 direction,
-                        UInt32 timeout) {
+/// Function pointer type for SCSI task execution — the single hardware abstraction point.
+/// All SCSI I/O goes through this, enabling mock injection for testing.
+typedef int (*ScsiExecFn)(void *ctx,
+                          SCSICommandDescriptorBlock cdb,
+                          UInt8 cdbSize,
+                          void *buffer,
+                          UInt32 bufferSize,
+                          UInt8 direction,
+                          UInt32 timeout);
+
+/// Real hardware implementation of ScsiExecFn.
+static int execSCSITaskReal(void *ctx,
+                            SCSICommandDescriptorBlock cdb,
+                            UInt8 cdbSize,
+                            void *buffer,
+                            UInt32 bufferSize,
+                            UInt8 direction,
+                            UInt32 timeout) {
+    SCSITaskDeviceInterface **dev = (SCSITaskDeviceInterface **)ctx;
     SCSITaskInterface **task = (*dev)->CreateSCSITask(dev);
     if (!task) return -1;
 
@@ -176,6 +187,23 @@ static int execSCSITask(SCSITaskDeviceInterface **dev,
     if (result != kIOReturnSuccess) return -2;
     if (status != kSCSITaskStatus_GOOD) return -3;
     return 0;
+}
+
+/// Global SCSI execution function — points to real hardware by default.
+/// Tests override this to inject mock behavior.
+static ScsiExecFn g_scsiExec = execSCSITaskReal;
+static void *g_scsiCtx = NULL;
+
+/// Execute a SCSI task through the abstraction layer.
+static int execSCSITask(SCSITaskDeviceInterface **dev,
+                        SCSICommandDescriptorBlock cdb,
+                        UInt8 cdbSize,
+                        void *buffer,
+                        UInt32 bufferSize,
+                        UInt8 direction,
+                        UInt32 timeout) {
+    void *ctx = g_scsiCtx ? g_scsiCtx : (void *)dev;
+    return g_scsiExec(ctx, cdb, cdbSize, buffer, bufferSize, direction, timeout);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,9 +309,12 @@ static int scsiInquiryVPD(SCSITaskDeviceInterface **dev, UInt8 page, void *buf, 
 /// management device. The SES device is the one that accepts diagnostic page
 /// commands for SMART data retrieval.
 ///
+/// When deviceIndex >= 0, opens the Nth device (0-based).
+/// When deviceIndex < 0, opens the first available device.
+///
 /// Returns an exclusive-access SCSITaskDeviceInterface, or NULL on failure.
 /// Caller must release exclusive access and the interface when done.
-static SCSITaskDeviceInterface **openWDDevice(char *nameOut, size_t nameSize) {
+static SCSITaskDeviceInterface **openWDDevice(char *nameOut, size_t nameSize, int deviceIndex) {
     io_iterator_t iter;
     io_service_t service;
 
@@ -291,6 +322,7 @@ static SCSITaskDeviceInterface **openWDDevice(char *nameOut, size_t nameSize) {
     kern_return_t kr = IOServiceGetMatchingServices(kIOMainPortDefault, match, &iter);
     if (kr != KERN_SUCCESS) return NULL;
 
+    int found = 0;
     while ((service = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
         // Read vendor/product identification from the IOKit registry
         CFTypeRef vendorRef = IORegistryEntrySearchCFProperty(
@@ -318,6 +350,13 @@ static SCSITaskDeviceInterface **openWDDevice(char *nameOut, size_t nameSize) {
             : @"";
         if (![trimmedProduct containsString:@"SES"]) {
             IOObjectRelease(service); continue;
+        }
+
+        // Skip until we reach the requested device index
+        if (deviceIndex >= 0 && found < deviceIndex) {
+            found++;
+            IOObjectRelease(service);
+            continue;
         }
 
         if (nameOut && product) {
@@ -363,6 +402,53 @@ static SCSITaskDeviceInterface **openWDDevice(char *nameOut, size_t nameSize) {
     return NULL;
 }
 
+/// List all connected WD SES devices with their disk LUN product names.
+static int listWDDevices(void) {
+    io_iterator_t iter;
+    CFMutableDictionaryRef match = IOServiceMatching("IOSCSIPeripheralDeviceNub");
+    kern_return_t kr = IOServiceGetMatchingServices(kIOMainPortDefault, match, &iter);
+    if (kr != KERN_SUCCESS) return 0;
+
+    // First pass: collect disk LUN names and SES device count
+    io_service_t service;
+    NSMutableArray *diskNames = [NSMutableArray array];
+    int sesCount = 0;
+
+    while ((service = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
+        CFTypeRef vendorRef = IORegistryEntrySearchCFProperty(
+            service, kIOServicePlane, CFSTR("Vendor Identification"),
+            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+        CFTypeRef productRef = IORegistryEntrySearchCFProperty(
+            service, kIOServicePlane, CFSTR("Product Identification"),
+            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+
+        NSString *vendor = vendorRef ? (__bridge_transfer NSString *)vendorRef : nil;
+        NSString *product = productRef ? (__bridge_transfer NSString *)productRef : nil;
+        if (!vendor) { IOObjectRelease(service); continue; }
+
+        NSString *tv = [vendor stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (![tv isEqualToString:@"WD"] && ![tv isEqualToString:@"WDC"]) {
+            IOObjectRelease(service); continue;
+        }
+        NSString *tp = product ? [product stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] : @"";
+
+        if ([tp containsString:@"SES"]) {
+            sesCount++;
+        } else {
+            [diskNames addObject:tp];
+        }
+        IOObjectRelease(service);
+    }
+    IOObjectRelease(iter);
+
+    // Print paired results
+    for (int i = 0; i < sesCount; i++) {
+        NSString *name = (i < (int)diskNames.count) ? diskNames[i] : @"Unknown";
+        printf("  [%d] %s\n", i, [name UTF8String]);
+    }
+    return sesCount;
+}
+
 /// Release device resources. Call when done with all commands.
 static void closeWDDevice(SCSITaskDeviceInterface **dev) {
     (*dev)->ReleaseExclusiveAccess(dev);
@@ -379,6 +465,47 @@ static UInt64 smartRawValue(const WDSmartAttribute *attr) {
     for (int i = 0; i < 6; i++)
         val |= ((UInt64)attr->raw[i]) << (i * 8);
     return val;
+}
+
+/// Format a SMART attribute's raw value for display.
+/// Some attributes have packed fields that need special decoding.
+static const char *smartRawFormatted(const WDSmartAttribute *attr) {
+    static char buf[64];
+    UInt64 raw = smartRawValue(attr);
+
+    switch (attr->id) {
+        case 9: { // Power-On Hours
+            UInt32 hours = (UInt32)(raw & 0xFFFFFFFF);
+            if (hours >= 24)
+                snprintf(buf, sizeof(buf), "%u (%ud %uh)", hours, hours / 24, hours % 24);
+            else
+                snprintf(buf, sizeof(buf), "%u", hours);
+            return buf;
+        }
+        case 190: // Airflow Temperature
+        case 194: { // Temperature — raw packs current (low byte), min, max
+            UInt8 current = raw & 0xFF;
+            UInt8 worst   = (raw >> 8) & 0xFF;  // or min
+            UInt8 limit   = (raw >> 32) & 0xFF;  // or max/limit
+            if (limit > 0 && limit != 0xFF && worst > 0 && worst != current)
+                snprintf(buf, sizeof(buf), "%u (min=%u, max=%u)", current, worst, limit);
+            else
+                snprintf(buf, sizeof(buf), "%u", current);
+            return buf;
+        }
+        case 3: { // Spin Up Time — lower 16 bits = current ms, upper may be average
+            UInt16 current = raw & 0xFFFF;
+            UInt16 average = (raw >> 16) & 0xFFFF;
+            if (average > 0 && average != current)
+                snprintf(buf, sizeof(buf), "%u (avg %u ms)", current, average);
+            else
+                snprintf(buf, sizeof(buf), "%u", current);
+            return buf;
+        }
+        default:
+            snprintf(buf, sizeof(buf), "%llu", raw);
+            return buf;
+    }
 }
 
 /// Self-test result code to human-readable string.
@@ -405,11 +532,15 @@ static const char *selfTestResultString(UInt8 code) {
 /// Display SMART attributes table.
 static void cmdSmart(SCSITaskDeviceInterface **dev) {
     // Read SMART threshold status (page 0x84)
+    // The WD SES bridge returns the ATA SMART RETURN STATUS signature bytes:
+    //   Pass: LBA High=0xC2, LBA Mid=0x4F
+    //   Fail: LBA High=0x2C, LBA Mid=0xF4
     WDSmartStatusPage statusPage = {0};
     if (scsiReceiveDiagnostic(dev, kWDDiagPageSmartStatus, &statusPage, sizeof(statusPage)) == 0) {
-        UInt16 status = ((UInt16)statusPage.statusMSB << 8) | statusPage.statusLSB;
-        printf("SMART Status: %s (0x%04X)\n\n",
-               status == 0 ? "PASSED" : "CHECK (see attributes)", status);
+        BOOL passed = (statusPage.statusMSB == 0xC2 && statusPage.statusLSB == 0x4F);
+        BOOL failed = (statusPage.statusMSB == 0x2C && statusPage.statusLSB == 0xF4);
+        const char *statusStr = passed ? "PASSED" : (failed ? "FAILED" : "UNKNOWN");
+        printf("SMART Status: %s\n\n", statusStr);
     }
 
     // Read full SMART attribute data (page 0x85)
@@ -425,24 +556,101 @@ static void cmdSmart(SCSITaskDeviceInterface **dev) {
     for (int i = 0; i < 30; i++) {
         WDSmartAttribute *a = &table->attrs[i];
         if (a->id == 0) continue;
-        printf("%-4d %-35s %7d %7d %llu\n",
-               a->id, smartAttrName(a->id), a->current, a->worst, smartRawValue(a));
+        printf("%-4d %-35s %7d %7d %s\n",
+               a->id, smartAttrName(a->id), a->current, a->worst, smartRawFormatted(a));
     }
+}
+
+/// Drive identity information (extracted from IOKit registry or mock).
+typedef struct {
+    char vendor[32];
+    char product[64];
+    char firmware[16];
+    BOOL found;
+} DriveIdentity;
+
+/// Function pointer for drive identity lookup. Abstracted for testing.
+typedef DriveIdentity (*DriveIdentityFn)(const char *targetSerial);
+
+/// Real implementation: reads disk LUN identity from IOKit registry.
+static DriveIdentity driveIdentityFromIOKit(const char *targetSerial) {
+    DriveIdentity ident = {0};
+    io_iterator_t iter;
+    CFMutableDictionaryRef match = IOServiceMatching("IOSCSIPeripheralDeviceNub");
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &iter) != KERN_SUCCESS) return ident;
+
+    io_service_t service;
+    while ((service = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
+        CFTypeRef vendorRef = IORegistryEntrySearchCFProperty(
+            service, kIOServicePlane, CFSTR("Vendor Identification"),
+            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+        CFTypeRef productRef = IORegistryEntrySearchCFProperty(
+            service, kIOServicePlane, CFSTR("Product Identification"),
+            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+        CFTypeRef devTypeRef = IORegistryEntryCreateCFProperty(
+            service, CFSTR("Peripheral Device Type"), kCFAllocatorDefault, 0);
+
+        NSString *vendor = vendorRef ? (__bridge_transfer NSString *)vendorRef : nil;
+        NSString *product = productRef ? (__bridge_transfer NSString *)productRef : nil;
+        NSNumber *devType = devTypeRef ? (__bridge_transfer NSNumber *)devTypeRef : nil;
+
+        if (!vendor || !devType) { IOObjectRelease(service); continue; }
+
+        NSString *tv = [vendor stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (![tv isEqualToString:@"WD"] && ![tv isEqualToString:@"WDC"]) {
+            IOObjectRelease(service); continue;
+        }
+
+        if ([devType intValue] != 0) { IOObjectRelease(service); continue; }
+
+        if (targetSerial) {
+            CFTypeRef snRef = IORegistryEntrySearchCFProperty(
+                service, kIOServicePlane, CFSTR("USB Serial Number"),
+                kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+            NSString *sn = snRef ? (__bridge_transfer NSString *)snRef : nil;
+            NSString *tp = product ? [product stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] : @"";
+            if (sn && ![sn containsString:@(targetSerial)] && ![tp containsString:@(targetSerial)]) {
+                IOObjectRelease(service); continue;
+            }
+        }
+
+        CFTypeRef revRef = IORegistryEntrySearchCFProperty(
+            service, kIOServicePlane, CFSTR("Product Revision Level"),
+            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+        NSString *firmware = revRef ? (__bridge_transfer NSString *)revRef : nil;
+
+        strlcpy(ident.vendor, [tv UTF8String], sizeof(ident.vendor));
+        if (product)
+            strlcpy(ident.product, [[product stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] UTF8String], sizeof(ident.product));
+        if (firmware)
+            strlcpy(ident.firmware, [[firmware stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] UTF8String], sizeof(ident.firmware));
+        ident.found = YES;
+
+        IOObjectRelease(service);
+        IOObjectRelease(iter);
+        return ident;
+    }
+    IOObjectRelease(iter);
+    return ident;
+}
+
+/// Global drive identity provider — tests can override.
+static DriveIdentityFn g_driveIdentity = driveIdentityFromIOKit;
+
+/// Display drive identity using the provider.
+static void printDriveIdentity(const char *targetSerial) {
+    DriveIdentity ident = g_driveIdentity(targetSerial);
+    if (!ident.found) return;
+    printf("Vendor:   %s\n", ident.vendor);
+    printf("Product:  %s\n", ident.product[0] ? ident.product : "Unknown");
+    if (ident.firmware[0])
+        printf("Firmware: %s\n", ident.firmware);
 }
 
 /// Display drive identity, serial, capacity, RPM, interface, encryption.
 static void cmdInfo(SCSITaskDeviceInterface **dev) {
-    // Standard INQUIRY: vendor, product, firmware revision
-    UInt8 inq[96] = {0};
-    if (scsiInquiry(dev, inq, sizeof(inq)) == 0) {
-        char vendor[9] = {0}, product[17] = {0}, firmware[5] = {0};
-        memcpy(vendor, &inq[8], 8);
-        memcpy(product, &inq[16], 16);
-        memcpy(firmware, &inq[32], 4);
-        printf("Vendor:   %s\n", vendor);
-        printf("Product:  %s\n", product);
-        printf("Firmware: %s\n", firmware);
-    }
+    // Get actual drive model from the disk LUN's IOKit registry properties
+    printDriveIdentity(NULL);
 
     // VPD page 0x80: Unit serial number
     UInt8 snBuf[40] = {0};
@@ -455,24 +663,23 @@ static void cmdInfo(SCSITaskDeviceInterface **dev) {
     }
 
     // VPD page 0xB1: Block device characteristics (RPM, form factor)
+    // Supported on some enclosures (MyBook) but not others (Passport)
     UInt8 bdc[64] = {0};
     if (scsiInquiryVPD(dev, 0xB1, bdc, sizeof(bdc)) == 0) {
         UInt16 rpm = ((UInt16)bdc[4] << 8) | bdc[5];
         UInt8 formFactor = bdc[7] & 0x0F;
 
-        printf("RPM:      %s\n", rpm > 0
-            ? [[NSString stringWithFormat:@"%d", rpm] UTF8String]
-            : "Non-rotating (SSD)");
+        if (rpm > 0)
+            printf("RPM:      %d\n", rpm);
 
-        const char *ffStr;
+        const char *ffStr = NULL;
         switch (formFactor) {
             case 1: ffStr = "5.25\""; break;
             case 2: ffStr = "3.5\"";  break;
             case 3: ffStr = "2.5\"";  break;
             case 4: ffStr = "1.8\"";  break;
-            default: ffStr = "Unknown"; break;
         }
-        printf("Form:     %s\n", ffStr);
+        if (ffStr) printf("Form:     %s\n", ffStr);
     }
 
     // VPD page 0xC2: WD raw capacity (total blocks, block size, bay count)
@@ -511,11 +718,15 @@ static void cmdInfo(SCSITaskDeviceInterface **dev) {
         printf("\n");
     }
 
-    // Diagnostic page 0x83: Encryption status
-    UInt8 enc[8] = {0};
-    if (scsiReceiveDiagnostic(dev, kWDDiagPageEncryptionStatus, enc, sizeof(enc)) == 0) {
+    // Encryption status: try vendor command 0xC0/0x45 first (full status),
+    // fall back to diagnostic page 0x83 (simplified)
+    UInt8 encFull[48] = {0};
+    SCSICommandDescriptorBlock encCdb = {0};
+    encCdb[0] = 0xC0; encCdb[1] = 0x45; encCdb[8] = 0x30;
+    if (execSCSITask(dev, encCdb, kSCSICDBSize_10Byte, encFull, 48,
+                     kSCSIDataTransfer_FromTargetToInitiator, kTimeoutDefault) == 0 && encFull[0] == 0x45) {
         const char *state;
-        switch (enc[4]) {
+        switch (encFull[3]) {
             case 0: state = "Off";                    break;
             case 1: state = "Locked";                 break;
             case 2: state = "Unlocked";               break;
@@ -523,7 +734,34 @@ static void cmdInfo(SCSITaskDeviceInterface **dev) {
             case 7: state = "No DEK";                 break;
             default: state = "Unknown";               break;
         }
-        printf("Encrypt:  %s\n", state);
+        const char *cipher;
+        switch (encFull[4]) {
+            case 0x10: cipher = "AES-128-ECB"; break;
+            case 0x18: cipher = "AES-128-XTS"; break;
+            case 0x20: cipher = "AES-256-ECB"; break;
+            case 0x28: cipher = "AES-256-XTS"; break;
+            case 0x30: cipher = "Full Disk";   break;
+            default:   cipher = NULL;          break;
+        }
+        if (cipher)
+            printf("Encrypt:  %s (%s)\n", state, cipher);
+        else
+            printf("Encrypt:  %s\n", state);
+    } else {
+        // Fallback to diagnostic page 0x83
+        UInt8 enc[8] = {0};
+        if (scsiReceiveDiagnostic(dev, kWDDiagPageEncryptionStatus, enc, sizeof(enc)) == 0) {
+            const char *state;
+            switch (enc[4]) {
+                case 0: state = "Off";                    break;
+                case 1: state = "Locked";                 break;
+                case 2: state = "Unlocked";               break;
+                case 6: state = "Max unlocks exceeded";   break;
+                case 7: state = "No DEK";                 break;
+                default: state = "Unknown";               break;
+            }
+            printf("Encrypt:  %s\n", state);
+        }
     }
 }
 
@@ -566,25 +804,33 @@ static void cmdStatus(SCSITaskDeviceInterface **dev) {
         return;
     }
 
-    printf("%-6s %-14s %-8s %s\n", "TEST#", "RESULT", "HOURS", "FIRST_ERROR_LBA");
+    printf("%-6s %-6s %-14s %-8s %s\n", "TEST#", "TYPE", "RESULT", "HOURS", "FIRST_ERROR_LBA");
 
     int entries = pageLen / 20;
     if (entries > 20) entries = 20;
 
     for (int i = 0; i < entries; i++) {
         UInt8 *entry = &buf[4 + i * 20];
-        UInt8 result  = entry[4] & 0x0F;
-        UInt8 testNum = entry[5];
-        UInt16 hours  = ((UInt16)entry[6] << 8) | entry[7];
+        UInt8 testCode = (entry[4] >> 5) & 0x07;
+        UInt8 result   = entry[4] & 0x0F;
+        UInt8 testNum  = entry[5];
+        UInt16 hours   = ((UInt16)entry[6] << 8) | entry[7];
 
-        // Skip empty entries
-        if (result == 0 && testNum == 0 && hours == 0) continue;
+        // Skip truly empty entries (all parameter data is zero)
+        if (testCode == 0 && result == 0 && testNum == 0 && hours == 0) continue;
 
         UInt64 lba = 0;
         for (int j = 0; j < 8; j++) lba = (lba << 8) | entry[8 + j];
 
-        printf("%-6d %-14s %-8d %s\n",
-               testNum, selfTestResultString(result), hours,
+        const char *typeStr;
+        switch (testCode) {
+            case 1: typeStr = "Short";    break;
+            case 2: typeStr = "Extended"; break;
+            default: typeStr = "Other";   break;
+        }
+
+        printf("%-6d %-6s %-14s %-8d %s\n",
+               testNum, typeStr, selfTestResultString(result), hours,
                (result >= 3 && result <= 8)
                    ? [[NSString stringWithFormat:@"%llu", lba] UTF8String]
                    : "-");
@@ -674,6 +920,225 @@ static void cmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MARK: - Encryption Commands
+// ---------------------------------------------------------------------------
+
+/// Read the Handy Store block (WD vendor command 0xD8).
+static int scsiReadHandyStore(SCSITaskDeviceInterface **dev, UInt32 block, void *buf, UInt32 size) {
+    SCSICommandDescriptorBlock cdb = {0};
+    cdb[0] = 0xD8;
+    cdb[2] = (block >> 24) & 0xFF;
+    cdb[3] = (block >> 16) & 0xFF;
+    cdb[4] = (block >> 8) & 0xFF;
+    cdb[5] = block & 0xFF;
+    cdb[6] = 0x00;  // LUN 0
+    cdb[8] = 0x01;  // 1 block
+    return execSCSITask(dev, cdb, kSCSICDBSize_10Byte, buf, size,
+                        kSCSIDataTransfer_FromTargetToInitiator, 15000);
+}
+
+/// Write a Handy Store block (WD vendor command 0xDA).
+static int scsiWriteHandyStore(SCSITaskDeviceInterface **dev, UInt32 block, void *buf, UInt32 size) {
+    SCSICommandDescriptorBlock cdb = {0};
+    cdb[0] = 0xDA;
+    cdb[2] = (block >> 24) & 0xFF;
+    cdb[3] = (block >> 16) & 0xFF;
+    cdb[4] = (block >> 8) & 0xFF;
+    cdb[5] = block & 0xFF;
+    cdb[6] = 0x00;
+    cdb[8] = 0x01;
+    return execSCSITask(dev, cdb, kSCSICDBSize_10Byte, buf, size,
+                        kSCSIDataTransfer_FromInitiatorToTarget, 15000);
+}
+
+/// Cook a password: ensure Handy Store has valid security params, then hash.
+/// salt (from Handy Store) + password → UTF-16LE → SHA-256.
+static int cookPassword(SCSITaskDeviceInterface **dev, const char *password, UInt8 *cookedOut) {
+    // Read Handy Store block 1
+    UInt8 hsBlock[512] = {0};
+    if (scsiReadHandyStore(dev, 1, hsBlock, sizeof(hsBlock)) != 0) {
+        fprintf(stderr, "Error: Could not read security parameters\n");
+        return -1;
+    }
+
+    // Verify security block signature (bytes 0-3 should be 00 01 44 57)
+    if (hsBlock[2] != 0x44 || hsBlock[3] != 0x57) {
+        // Initialize the security block
+        memset(hsBlock, 0, 512);
+        hsBlock[0] = 0x00; hsBlock[1] = 0x01; hsBlock[2] = 0x44; hsBlock[3] = 0x57;
+        // Default salt "WDC." in UTF-16LE at offset 0x0C
+        UInt8 defaultSalt[] = {0x57, 0x00, 0x44, 0x00, 0x43, 0x00, 0x2E, 0x00};
+        memcpy(&hsBlock[0x0C], defaultSalt, 8);
+    }
+
+    // Ensure iterations are set (offset 0x08, 32-bit LE)
+    UInt32 iterations = ((UInt32)hsBlock[8]) | ((UInt32)hsBlock[9] << 8)
+                      | ((UInt32)hsBlock[10] << 16) | ((UInt32)hsBlock[11] << 24);
+    if (iterations == 0) {
+        iterations = 1000;
+        hsBlock[8] = iterations & 0xFF;
+        hsBlock[9] = (iterations >> 8) & 0xFF;
+        hsBlock[10] = (iterations >> 16) & 0xFF;
+        hsBlock[11] = (iterations >> 24) & 0xFF;
+
+        // Recalculate checksum: sum bytes 0-510, negate, store at 511
+        UInt8 sum = 0;
+        for (int i = 0; i < 511; i++) sum += hsBlock[i];
+        hsBlock[511] = (UInt8)(-(int8_t)sum);
+
+        // Write back
+        if (scsiWriteHandyStore(dev, 1, hsBlock, sizeof(hsBlock)) != 0) {
+            fprintf(stderr, "Error: Could not write security parameters\n");
+            return -1;
+        }
+    }
+
+    // Extract salt (UTF-16LE at offset 0x0C)
+    int saltLen = 0;
+    for (int i = 0x0C; i < 0x1C; i += 2) {
+        if (hsBlock[i] == 0 && hsBlock[i+1] == 0) break;
+        saltLen += 2;
+    }
+
+    // Build combined UTF-16LE: salt + password
+    NSString *passwordStr = [NSString stringWithUTF8String:password];
+    NSData *passwordUTF16 = [passwordStr dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
+
+    NSMutableData *combined = [NSMutableData dataWithBytes:&hsBlock[0x0C] length:saltLen];
+    [combined appendData:passwordUTF16];
+
+    // SHA-256
+    CC_SHA256([combined bytes], (CC_LONG)[combined length], cookedOut);
+    return 0;
+}
+
+/// Send a WD encryption command. Tries Optimus protocol (0xB5/0xEF) first,
+/// falls back to legacy (0xC1) if Optimus fails.
+/// Send an encryption command using the legacy 0xC1 protocol.
+/// Page format: 0x48 bytes, signature 0x45 at byte 0.
+///   Arm:    CDB=C1 E2, page[3]=0x01, password at offset 0x28
+///   Disarm: CDB=C1 E2, page[3]=0x10, password at offset 0x08
+///   Unlock: CDB=C1 E1, page[3]=0x01, password at offset 0x08
+static int scsiEncryptLegacy(SCSITaskDeviceInterface **dev, UInt8 subCmd, UInt8 flag, UInt8 *cooked, int pwOffset) {
+    UInt8 page[0x48] = {0};
+    page[0] = 0x45;
+    page[3] = flag;
+    page[7] = 32;
+    memcpy(&page[pwOffset], cooked, 32);
+
+    SCSICommandDescriptorBlock cdb = {0};
+    cdb[0] = 0xC1;
+    cdb[1] = subCmd;
+    cdb[8] = 0x48;
+    return execSCSITask(dev, cdb, kSCSICDBSize_10Byte, page, 0x48,
+                        kSCSIDataTransfer_FromInitiatorToTarget, 60000);
+}
+
+/// Set a password (arm encryption). Drive locks on next power cycle.
+static void cmdSetPassword(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset) {
+    if (argc <= argOffset + 1) {
+        fprintf(stderr, "Usage: wd_smart set-password <password>\n");
+        return;
+    }
+    const char *password = argv[argOffset + 1];
+    if (strlen(password) < 1 || strlen(password) > 32) {
+        fprintf(stderr, "Error: Password must be 1-32 characters\n");
+        return;
+    }
+
+    UInt8 cooked[32] = {0};
+    if (cookPassword(dev, password, cooked) != 0) return;
+
+    if (scsiEncryptLegacy(dev, 0xE2, 0x01, cooked, 0x28) == 0)
+        printf("Password set. Drive will lock on next power cycle.\n"
+               "Use 'unlock' to access after reconnecting.\n");
+    else
+        fprintf(stderr, "Error: Could not set password (drive may not support user encryption)\n");
+}
+
+/// Unlock a locked drive with password.
+static void cmdUnlock(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset) {
+    if (argc <= argOffset + 1) {
+        fprintf(stderr, "Usage: wd_smart unlock <password>\n");
+        return;
+    }
+    const char *password = argv[argOffset + 1];
+
+    UInt8 cooked[32] = {0};
+    if (cookPassword(dev, password, cooked) != 0) return;
+
+    if (scsiEncryptLegacy(dev, 0xE1, 0x01, cooked, 0x08) == 0)
+        printf("Drive unlocked.\n");
+    else
+        fprintf(stderr, "Error: Unlock failed (wrong password?)\n");
+}
+
+/// Remove password (disarm encryption). Requires current password.
+static void cmdRemovePassword(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset) {
+    if (argc <= argOffset + 1) {
+        fprintf(stderr, "Usage: wd_smart remove-password <current-password>\n");
+        return;
+    }
+    const char *password = argv[argOffset + 1];
+
+    UInt8 cooked[32] = {0};
+    if (cookPassword(dev, password, cooked) != 0) return;
+
+    if (scsiEncryptLegacy(dev, 0xE2, 0x10, cooked, 0x08) == 0)
+        printf("Password removed. Encryption disabled.\n");
+    else
+        fprintf(stderr, "Error: Could not remove password (wrong password?)\n");
+}
+
+/// Reset the Data Encryption Key. DESTROYS ALL DATA. Requires --confirm.
+static void cmdResetDEK(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
+    BOOL confirmed = NO;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--confirm") == 0) confirmed = YES;
+    }
+    if (!confirmed) {
+        fprintf(stderr,
+            "WARNING: reset-dek generates a new encryption key.\n"
+            "         ALL DATA ON THE DRIVE WILL BE PERMANENTLY LOST.\n"
+            "         The drive will be usable again but empty.\n\n"
+            "To proceed, run:\n"
+            "  sudo wd_smart reset-dek --confirm\n");
+        return;
+    }
+
+    fprintf(stderr, "*** RESETTING ENCRYPTION KEY — ALL DATA WILL BE DESTROYED ***\n");
+#ifndef TESTING
+    for (int i = 5; i > 0; i--) {
+        fprintf(stderr, "  Resetting in %d... (Ctrl-C to cancel)\n", i);
+        sleep(1);
+    }
+#endif
+
+    // Reset DEK: C1 E3 with KRE from status
+    UInt8 stBuf[48] = {0};
+    SCSICommandDescriptorBlock stcdb = {0};
+    stcdb[0] = 0xC0; stcdb[1] = 0x45; stcdb[8] = 0x30;
+    if (execSCSITask(dev, stcdb, kSCSICDBSize_10Byte, stBuf, 48,
+                     kSCSIDataTransfer_FromTargetToInitiator, 10000) != 0) {
+        fprintf(stderr, "Error: Could not read encryption status\n");
+        return;
+    }
+
+    UInt8 page[0x48] = {0};
+    page[0] = 0x45;
+    memcpy(&page[8], &stBuf[8], 4); // KeyResetEnabler
+
+    SCSICommandDescriptorBlock cdb = {0};
+    cdb[0] = 0xC1; cdb[1] = 0xE3; cdb[8] = 0x48;
+    if (execSCSITask(dev, cdb, kSCSICDBSize_10Byte, page, 0x48,
+                     kSCSIDataTransfer_FromInitiatorToTarget, 60000) == 0)
+        printf("DEK reset complete. All data has been erased.\n"
+               "The drive is now usable without a password.\n");
+    else
+        fprintf(stderr, "Error: Could not reset DEK\n");
+}
+
 /// Safely power off the drive (spin down + disconnect).
 /// After this command, the drive can be physically unplugged.
 static void cmdPowerOff(SCSITaskDeviceInterface **dev) {
@@ -710,10 +1175,12 @@ static void cmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]
     // 5-second countdown giving the user a chance to Ctrl-C
     fprintf(stderr, "*** ALL DATA WILL BE DESTROYED ***\n");
     fprintf(stderr, "Press Ctrl-C to cancel.\n\n");
+#ifndef TESTING
     for (int i = 5; i > 0; i--) {
         fprintf(stderr, "  Erasing in %d...\n", i);
         sleep(1);
     }
+#endif
 
     // WD vendor-specific FORMAT DISK command (opcode 0xC4)
     SCSICommandDescriptorBlock cdb = {0};
@@ -906,7 +1373,7 @@ static void cmdSecureErase(int argc, const char *argv[]) {
 
 static void usage(void) {
     fprintf(stderr,
-        "Usage: wd_smart <command> [args]\n"
+        "Usage: wd_smart [--disk N] <command> [args]\n"
         "\n"
         "Commands:\n"
         "  smart          Read SMART attributes (default)\n"
@@ -920,6 +1387,14 @@ static void usage(void) {
         "  power-off      Safely spin down and power off drive\n"
         "  erase          Quick format via WD bridge (requires --confirm)\n"
         "  secure-erase   Zero-fill every sector (requires --confirm)\n"
+        "  list           Show all connected WD drives\n"
+        "  set-password   Set encryption password (locks on next power cycle)\n"
+        "  unlock         Unlock a locked drive\n"
+        "  remove-password Remove encryption password\n"
+        "  reset-dek      Reset encryption key (DESTROYS ALL DATA, --confirm)\n"
+        "\n"
+        "Options:\n"
+        "  --disk N       Select drive by index (see 'list' command)\n"
         "\n"
         "Requires: sudo (root access needed for IOKit SCSI commands)\n"
     );
@@ -927,16 +1402,33 @@ static void usage(void) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        const char *cmd = (argc > 1) ? argv[1] : "smart";
+        // Parse --disk N option
+        int deviceIndex = -1;  // -1 = first available
+        int argOffset = 1;
+
+        if (argc > 2 && strcmp(argv[1], "--disk") == 0) {
+            deviceIndex = atoi(argv[2]);
+            argOffset = 3;
+        }
+
+        const char *cmd = (argc > argOffset) ? argv[argOffset] : "smart";
 
         if (strcmp(cmd, "-h") == 0 || strcmp(cmd, "--help") == 0 || strcmp(cmd, "help") == 0) {
             usage();
             return 0;
         }
 
+        if (strcmp(cmd, "list") == 0) {
+            printf("Connected WD drives:\n");
+            int count = listWDDevices();
+            if (count == 0) printf("  (none found)\n");
+            printf("\nUse --disk N to select a drive.\n");
+            return 0;
+        }
+
         // Open the WD SES device
         char deviceName[256] = {0};
-        SCSITaskDeviceInterface **dev = openWDDevice(deviceName, sizeof(deviceName));
+        SCSITaskDeviceInterface **dev = openWDDevice(deviceName, sizeof(deviceName), deviceIndex);
         if (!dev) {
             fprintf(stderr, "Error: No WD device found or could not access it.\n");
             return 1;
@@ -952,9 +1444,13 @@ int main(int argc, const char *argv[]) {
         else if (strcmp(cmd, "abort-test") == 0) cmdAbortTest(dev);
         else if (strcmp(cmd, "status") == 0)     cmdStatus(dev);
         else if (strcmp(cmd, "temp") == 0)       cmdTemp(dev);
-        else if (strcmp(cmd, "sleep") == 0)      cmdSleep(dev, argc > 2 ? argv[2] : NULL);
+        else if (strcmp(cmd, "sleep") == 0)      cmdSleep(dev, argc > argOffset+1 ? argv[argOffset+1] : NULL);
         else if (strcmp(cmd, "power-off") == 0)  cmdPowerOff(dev);
         else if (strcmp(cmd, "erase") == 0)     cmdErase(dev, argc, argv);
+        else if (strcmp(cmd, "set-password") == 0)    cmdSetPassword(dev, argc, argv, argOffset);
+        else if (strcmp(cmd, "unlock") == 0)          cmdUnlock(dev, argc, argv, argOffset);
+        else if (strcmp(cmd, "remove-password") == 0) cmdRemovePassword(dev, argc, argv, argOffset);
+        else if (strcmp(cmd, "reset-dek") == 0)       cmdResetDEK(dev, argc, argv);
         else if (strcmp(cmd, "secure-erase") == 0) {
             closeWDDevice(dev);  // release SES before accessing disk LUN
             cmdSecureErase(argc, argv);
