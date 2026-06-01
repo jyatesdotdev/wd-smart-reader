@@ -34,6 +34,13 @@ xcode-select --install  # if not already installed
 make
 ```
 
+## Test
+
+```bash
+make test       # run 50 unit tests
+make coverage   # run tests with llvm-cov coverage report
+```
+
 ## Usage
 
 ```bash
@@ -53,8 +60,21 @@ sudo ./wd_smart [command]
 | `temp` | Show drive temperature |
 | `sleep [MIN]` | Get or set sleep timer (0 = disable) |
 | `power-off` | Safely spin down and power off drive |
+| `set-password` | Enable drive encryption (locks on power cycle) |
+| `unlock` | Unlock a locked drive |
+| `remove-password` | Disable encryption (requires current password) |
+| `reset-dek` | Reset encryption key — **destroys all data** |
 | `erase` | Quick format via WD bridge (requires `--confirm`) |
 | `secure-erase` | Zero-fill every sector (requires `--confirm`) |
+| `list` | List connected WD drives |
+
+### Multi-Drive Support
+
+```bash
+sudo ./wd_smart --disk 0 info   # first drive
+sudo ./wd_smart --disk 1 info   # second drive
+sudo ./wd_smart list            # show all connected WD drives
+```
 
 ### Examples
 
@@ -67,6 +87,14 @@ sudo ./wd_smart temp           # current drive temperature
 sudo ./wd_smart sleep 30       # spin down after 30 min idle
 sudo ./wd_smart sleep 0        # disable sleep timer
 sudo ./wd_smart power-off      # safe eject / power off
+
+# Encryption
+sudo ./wd_smart set-password "mypassword"     # enable encryption
+sudo ./wd_smart unlock "mypassword"           # unlock after power cycle
+sudo ./wd_smart remove-password "mypassword"  # disable encryption
+sudo ./wd_smart reset-dek --confirm           # nuke encryption key (DATA LOSS)
+
+# Destructive
 sudo ./wd_smart erase --confirm        # quick format (bridge-level)
 sudo ./wd_smart secure-erase --confirm # full zero-fill (20+ hrs on 18TB)
 ```
