@@ -116,6 +116,22 @@ sudo make install   # copies to /usr/local/bin
 | Reallocation Event Count (196) | Raw > 0 |
 | Helium Level (22) | Dropping below 100 (sealed drive leak) |
 
+## Project Structure
+
+```
+src/
+  WDSmart.h          — Shared header (types, constants, declarations)
+  WDScsi.m           — SCSI transport abstraction + command wrappers
+  WDDevice.m         — IOKit device discovery and management
+  WDCommands.m       — SMART parsing, info, temp, sleep, self-test, erase
+  WDEncryption.m     — Password cooking and encryption commands
+  main.m             — CLI entry point
+wd_smart_tests.m    — 50 unit tests with mock WD drive emulator
+Makefile            — Build, test, coverage, install
+ARCHITECTURE.md     — Design decisions and testing strategy
+AGENTS.md           — Protocol reference and development notes
+```
+
 ## Compatibility
 
 - macOS (tested on Apple Silicon, arm64)
