@@ -171,7 +171,7 @@ void WDCmdResetDEK(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) 
     }
 #endif
 
-    // Reset DEK: C1 E3 with KRE from status
+    // Reset DEK: C1 E3 with KRE in CDB bytes 2-5, data page with cipher + random seed
     UInt8 stBuf[48] = {0};
     SCSICommandDescriptorBlock stcdb = {0};
     stcdb[0] = 0xC0; stcdb[1] = 0x45; stcdb[8] = 0x30;
@@ -181,18 +181,39 @@ void WDCmdResetDEK(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) 
         return;
     }
 
-    UInt8 page[0x48] = {0};
-    page[0] = 0x45;
-    memcpy(&page[8], &stBuf[8], 4); // KeyResetEnabler
+    UInt8 cipher = stBuf[4];
+    UInt8 page[0x28] = {0};
+    page[0] = 0x45;   // signature
+    page[3] = 0x01;   // flag
+    page[4] = cipher; // cipher ID from status
+
+    // Fill DEK seed with random bytes
+    UInt8 xferLen = 0x08; // minimum
+    if (cipher == 0x20 || cipher == 0x28 || cipher == 0x30) {
+        xferLen = 0x28; // 8 header + 32 random bytes
+        page[7] = 0x01; // count
+        FILE *rnd = fopen("/dev/random", "r");
+        if (rnd) {
+            for (int i = 0; i < 32; i++) page[8 + i] = fgetc(rnd);
+            fclose(rnd);
+        }
+    }
 
     SCSICommandDescriptorBlock cdb = {0};
-    cdb[0] = 0xC1; cdb[1] = 0xE3; cdb[8] = 0x48;
-    if (WDExecSCSITask(dev, cdb, kSCSICDBSize_10Byte, page, 0x48,
+    cdb[0] = 0xC1;
+    cdb[1] = 0xE3;
+    cdb[2] = stBuf[8];  // KRE byte 0
+    cdb[3] = stBuf[9];  // KRE byte 1
+    cdb[4] = stBuf[10]; // KRE byte 2
+    cdb[5] = stBuf[11]; // KRE byte 3
+    cdb[8] = xferLen;
+
+    if (WDExecSCSITask(dev, cdb, kSCSICDBSize_10Byte, page, xferLen,
                      kSCSIDataTransfer_FromInitiatorToTarget, 60000) == 0)
         printf("DEK reset complete. All data has been erased.\n"
                "The drive is now usable without a password.\n");
     else
-        fprintf(stderr, "Error: Could not reset DEK\n");
+        fprintf(stderr, "Error: Could not reset DEK (not supported on this drive)\n");
 }
 
 /// Safely power off the drive (spin down + disconnect).

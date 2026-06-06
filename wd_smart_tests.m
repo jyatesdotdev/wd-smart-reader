@@ -12,6 +12,7 @@
 typedef struct {
     UInt8  opcode;
     UInt8  subcode;
+    UInt8  cdb[10];
     UInt8  data[0x48];
     UInt32 dataSize;
     UInt8  direction;
@@ -137,6 +138,7 @@ static int mockExecSCSI(void *ctx,
     if (g_mock.recordCount < 64) {
         MockSCSIRecord *r = &g_mock.records[g_mock.recordCount++];
         r->opcode = cdb[0]; r->subcode = cdb[1];
+        memcpy(r->cdb, cdb, 10);
         r->direction = direction; r->dataSize = bufferSize;
         if (direction == kSCSIDataTransfer_FromInitiatorToTarget && buffer && bufferSize <= 0x48)
             memcpy(r->data, buffer, bufferSize);
@@ -427,16 +429,20 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     g_mock.securityState = 0x02; g_mock.passwordSet = YES;
     const char *argv[] = {"wd_smart", "reset-dek", "--confirm"};
     WDCmdResetDEK(NULL, 3, argv);
-    BOOL sentReset = NO;
+    // Should have read status (C0 45) then sent reset (C1 E3) with KRE in CDB
+    BOOL readStatus = NO, sentReset = NO;
     for (int i = 0; i < g_mock.recordCount; i++) {
+        if (g_mock.records[i].opcode == 0xC0) readStatus = YES;
         if (g_mock.records[i].opcode == 0xC1 && g_mock.records[i].subcode == 0xE3) {
             sentReset = YES;
-            XCTAssertEqual(g_mock.records[i].data[8], 0xAA);
-            XCTAssertEqual(g_mock.records[i].data[9], 0xBB);
-            XCTAssertEqual(g_mock.records[i].data[10], 0xCC);
-            XCTAssertEqual(g_mock.records[i].data[11], 0xDD);
+            // KRE should be in CDB bytes 2-5
+            XCTAssertEqual(g_mock.records[i].cdb[2], 0xAA);
+            XCTAssertEqual(g_mock.records[i].cdb[3], 0xBB);
+            XCTAssertEqual(g_mock.records[i].cdb[4], 0xCC);
+            XCTAssertEqual(g_mock.records[i].cdb[5], 0xDD);
         }
     }
+    XCTAssertTrue(readStatus);
     XCTAssertTrue(sentReset);
     XCTAssertEqual(g_mock.securityState, 0x00);
 }
