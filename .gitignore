@@ -4,3 +4,4 @@ wd_smart_tests_cov
 *.profraw
 *.profdata
 .DS_Store
+*.o
