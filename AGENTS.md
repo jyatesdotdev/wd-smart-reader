@@ -145,20 +145,34 @@ Data (0x24 bytes): password at offset 2.
 
 This bridge uses the legacy 0xC1 protocol with specific page layouts:
 
-| Operation | CDB | flag (byte 3) | Password offset |
-|-----------|-----|---------------|-----------------|
-| Arm (set-password) | C1 E2 00 00 00 00 00 00 48 00 | 0x01 | 0x28 |
-| Disarm (remove-password) | C1 E2 00 00 00 00 00 00 48 00 | 0x10 | 0x08 |
-| Unlock | C1 E1 00 00 00 00 00 00 48 00 | 0x01 | 0x08 |
-| Reset DEK | C1 E3 00 00 00 00 00 00 48 00 | 0x00 | N/A (uses KRE at offset 0x08) |
+| Operation | CDB | flag (byte 3) | Password offset | Page size |
+|-----------|-----|---------------|-----------------|-----------|
+| Arm (set-password) | C1 E2 00 00 00 00 00 00 48 00 | 0x01 | 0x28 | 0x48 |
+| Disarm (remove-password) | C1 E2 00 00 00 00 00 00 48 00 | 0x10 | 0x08 | 0x48 |
+| Unlock | C1 E1 00 00 00 00 00 00 28 00 | 0x00 | 0x08 | 0x28 |
+| Reset DEK | C1 E3 [KRE0-3] 00 00 [len] 00 | 0x01 | N/A | varies |
 
-Page format (0x48 bytes):
+Page format:
 - Byte 0: 0x45 (signature)
 - Byte 3: operation flag
 - Byte 7: password length (32)
 - Offset 0x08 or 0x28: 32-byte cooked password (offset depends on operation)
 
+Reset DEK page (for cipher 0x20/0x28): 0x28 bytes with cipher + 32 random bytes at offset 8.
+Reset DEK page (for cipher 0x30/0x31 or special PIDs): 0x08 bytes, no random.
+
 **Critical**: Sense 05/74/40 means "invalid data in page" (wrong password offset or wrong password), NOT "command unsupported." The Optimus protocol (0xB5) is genuinely unsupported (05/20/00).
+
+### LED Control Protocol
+
+Uses MODE SENSE/SELECT on vendor page 0x21:
+- MODE SENSE: `1A 08 21 00 10 00` (page 0x21, DBD=1, 16 bytes)
+- Response: 4-byte header + page data; LED state at absolute byte 12 (0xFF=on, 0x00=off)
+- MODE SELECT: `15 11 00 00 10 00` (PF+SP, 16 bytes)
+  - Clear header bytes 0-3
+  - Clear PS bit (byte 4 &= 0x7F)
+  - Set byte 12 = 0xFF (on) or 0x00 (off)
+- Supported on: Passport 0748 ✓, MyBook 25ED (needs probe)
 
 ## Disk LUN Access Limitations
 
@@ -182,7 +196,11 @@ WD Drive Utilities uses the same IOKit APIs we do — no kernel extensions, no s
 - No VPD 0xB1 (RPM not available)
 - No page 0x86 (temperature from SMART attr 194 only)
 - Self-test log: only retains most recent result
-- Encryption: status shows 0x00 via diag page 0x83
+- Encryption: AES-256-ECB (cipher 0x20), arm/disarm/unlock work, reset-dek rejected
+- LED control: YES — MODE SENSE/SELECT page 0x21, LED state at byte 12 (0xFF=on, 0x00=off)
+- Sleep timer: read works, write (MODE SELECT) rejected by bridge
+- Erase (0xC4): works
+- Not Optimus, no VCD support
 
 ### My Book 25ED (18TB, fw 1031, "Nighthawk 1U")
 - Diagnostic pages: 0x00, 0x08, 0x80, 0x83, 0x84, 0x85
@@ -190,9 +208,29 @@ WD Drive Utilities uses the same IOKit APIs we do — no kernel extensions, no s
 - VPD 0xB1 works: RPM=7200
 - No page 0x86 (temperature from SMART attr 194 only)
 - Has helium (SMART attr 22 = 100)
-- Encryption: Full Disk (cipher 0x30), state Unlocked, via 0xC0/0x45
-- Encryption write commands: ALL REJECTED (see above)
+- Encryption: Full Disk (cipher 0x30), arm/disarm/unlock work, reset-dek rejected (E3 opcode unknown)
+- LED control: needs probe (page 0x21)
+- Sleep timer: read AND write work; disable (value=0) rejected (minimum enforced)
+- Not Optimus, no VCD support
 - USB: idVendor=0x1058, idProduct=0x25ED (9709)
+
+### Feature Support Matrix
+
+| Feature | Passport 0748 | MyBook 25ED | Detection Method |
+|---------|:---:|:---:|---------|
+| SMART data/status | ✓ | ✓ | RECEIVE DIAG 0x84/0x85 |
+| Self-test control | ✓ | ✓ | SEND DIAG 0x1D |
+| Self-test log | ✓ | ✓ | LOG SENSE page 0x10 |
+| Temperature | ✓ | ✓ | SMART attr 194 |
+| Encryption | ✓ | ✓ | Vendor 0xC0/0x45 |
+| Reset DEK | ✗ | ✗ | Vendor 0xC1/0xE3 |
+| Sleep timer read | ✓ | ✓ | MODE SENSE page 0x1A |
+| Sleep timer write | ✗ | ✓ | MODE SELECT page 0x1A |
+| LED control | ✓ | ? | MODE SENSE/SELECT page 0x21 |
+| Power off | ✓ | ✓ | SEND DIAG page 0x80 |
+| Erase | ✓ | ? | Vendor 0xC4 |
+| Optimus | ✗ | ✗ | Probe opcode 0xA2 |
+| VCD | ✗ | ? | MODE SENSE page 0x24 |
 
 ## Build
 
