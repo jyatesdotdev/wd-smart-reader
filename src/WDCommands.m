@@ -7,6 +7,7 @@
 #import <sys/disk.h>
 #import <fcntl.h>
 #import <unistd.h>
+#import <dlfcn.h>
 #import <DiskArbitration/DiskArbitration.h>
 
 #pragma mark - SMART Attribute Name Lookup
@@ -550,10 +551,10 @@ void WDCmdPowerOff(SCSITaskDeviceInterface **dev) {
         fprintf(stderr, "Error: Power off failed. Try 'diskutil eject /dev/diskN' instead.\n");
 }
 
-/// Erase the drive by sending the WD FORMAT DISK vendor command (0xC4).
-/// This is IRREVERSIBLE. Requires --confirm flag and shows a countdown.
+/// Erase the drive using diskutil (same method as WD Drive Utilities).
+/// Repartitions with a single ExFAT volume.
 void WDCmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
-    // Require explicit --confirm flag
+    (void)dev;
     BOOL confirmed = NO;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--confirm") == 0) confirmed = YES;
@@ -568,8 +569,13 @@ void WDCmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
         return;
     }
 
-    // 5-second countdown giving the user a chance to Ctrl-C
-    fprintf(stderr, "*** ALL DATA WILL BE DESTROYED ***\n");
+    NSString *bsdName = WDFindDiskBSDName();
+    if (!bsdName) {
+        fprintf(stderr, "Error: Could not find WD disk device\n");
+        return;
+    }
+
+    fprintf(stderr, "*** ALL DATA ON /dev/%s WILL BE DESTROYED ***\n", [bsdName UTF8String]);
     fprintf(stderr, "Press Ctrl-C to cancel.\n\n");
 #ifndef TESTING
     for (int i = 5; i > 0; i--) {
@@ -578,38 +584,26 @@ void WDCmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
     }
 #endif
 
-    // Unmount all volumes on the drive using DiskArbitration (same as WD Drive Utilities)
-    NSString *bsdName = WDFindDiskBSDName();
-    if (bsdName) {
-        fprintf(stderr, "Unmounting /dev/%s...\n", [bsdName UTF8String]);
-        DASessionRef session = DASessionCreate(kCFAllocatorDefault);
-        if (session) {
-            DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session,
-                                                     [[NSString stringWithFormat:@"/dev/%@", bsdName] UTF8String]);
-            if (disk) {
-                DADiskUnmount(disk, kDADiskUnmountOptionWhole | kDADiskUnmountOptionForce, NULL, NULL);
-                // Give DiskArbitration time to process
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 2.0, false);
-                CFRelease(disk);
-            }
-            CFRelease(session);
-        }
-    } else {
-        fprintf(stderr, "Warning: Could not find disk to unmount. Proceeding anyway.\n");
-    }
+    fprintf(stderr, "Erasing /dev/%s...\n", [bsdName UTF8String]);
 
-    // WD vendor-specific FORMAT DISK command (opcode 0xC4)
-    SCSICommandDescriptorBlock cdb = {0};
-    cdb[0] = 0xC4;  // FORMAT DISK (WD vendor-specific)
+    // Use NSTask + diskutil eraseDisk (same as WD Drive Utilities)
+    NSTask *task = [[NSTask alloc] init];
+    [task setLaunchPath:@"/usr/sbin/diskutil"];
+    [task setArguments:@[@"eraseDisk", @"ExFAT", @"My Book", @"GPT",
+                         [NSString stringWithFormat:@"/dev/%@", bsdName]]];
+    NSPipe *pipe = [NSPipe pipe];
+    [task setStandardOutput:pipe];
+    [task setStandardError:pipe];
+    [task launch];
+    [task waitUntilExit];
 
-    int r = WDExecSCSITask(dev, cdb, kSCSICDBSize_10Byte, NULL, 0,
-                         kSCSIDataTransfer_NoDataTransfer, kTimeoutLong);
+    NSData *output = [[pipe fileHandleForReading] readDataToEndOfFile];
+    NSString *result = [[NSString alloc] initWithData:output encoding:NSUTF8StringEncoding];
 
-    if (r == 0)
-        printf("Erase command sent. Drive is formatting.\n"
-               "This may take a long time. Do not disconnect the drive.\n");
+    if ([task terminationStatus] == 0)
+        printf("Erase complete. Drive formatted as ExFAT.\n");
     else
-        fprintf(stderr, "Error: Erase command failed (%d)\n", r);
+        fprintf(stderr, "Error: Erase failed.\n%s\n", [result UTF8String]);
 }
 
 /// Find the BSD name (e.g. "disk12") of the WD disk LUN (not the SES device).
