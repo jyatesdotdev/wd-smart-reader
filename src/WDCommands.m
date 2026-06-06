@@ -7,6 +7,7 @@
 #import <sys/disk.h>
 #import <fcntl.h>
 #import <unistd.h>
+#import <DiskArbitration/DiskArbitration.h>
 
 #pragma mark - SMART Attribute Name Lookup
 
@@ -577,6 +578,26 @@ void WDCmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
     }
 #endif
 
+    // Unmount all volumes on the drive using DiskArbitration (same as WD Drive Utilities)
+    NSString *bsdName = WDFindDiskBSDName();
+    if (bsdName) {
+        fprintf(stderr, "Unmounting /dev/%s...\n", [bsdName UTF8String]);
+        DASessionRef session = DASessionCreate(kCFAllocatorDefault);
+        if (session) {
+            DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session,
+                                                     [[NSString stringWithFormat:@"/dev/%@", bsdName] UTF8String]);
+            if (disk) {
+                DADiskUnmount(disk, kDADiskUnmountOptionWhole | kDADiskUnmountOptionForce, NULL, NULL);
+                // Give DiskArbitration time to process
+                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 2.0, false);
+                CFRelease(disk);
+            }
+            CFRelease(session);
+        }
+    } else {
+        fprintf(stderr, "Warning: Could not find disk to unmount. Proceeding anyway.\n");
+    }
+
     // WD vendor-specific FORMAT DISK command (opcode 0xC4)
     SCSICommandDescriptorBlock cdb = {0};
     cdb[0] = 0xC4;  // FORMAT DISK (WD vendor-specific)
@@ -697,12 +718,17 @@ void WDCmdSecureErase(int argc, const char *argv[]) {
         sleep(1);
     }
 
-    // Unmount all volumes
-    NSString *unmountCmd = [NSString stringWithFormat:@"diskutil unmountDisk /dev/%@", bsdName];
-    if (system([unmountCmd UTF8String]) != 0) {
-        fprintf(stderr, "Error: Could not unmount disk. Aborting.\n");
-        return;
+    // Unmount all volumes using DiskArbitration
+    DASessionRef session = DASessionCreate(kCFAllocatorDefault);
+    if (!session) { fprintf(stderr, "Error: Could not create DA session\n"); return; }
+    DADiskRef daDisk = DADiskCreateFromBSDName(kCFAllocatorDefault, session,
+                                               [[NSString stringWithFormat:@"/dev/%@", bsdName] UTF8String]);
+    if (daDisk) {
+        DADiskUnmount(daDisk, kDADiskUnmountOptionWhole | kDADiskUnmountOptionForce, NULL, NULL);
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 2.0, false);
+        CFRelease(daDisk);
     }
+    CFRelease(session);
 
     // Open raw character device for writing
     NSString *rawPath = [NSString stringWithFormat:@"/dev/r%@", bsdName];

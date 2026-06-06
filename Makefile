@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -fobjc-arc -Wall -Isrc
-FRAMEWORKS = -framework Foundation -framework IOKit -framework CoreFoundation
+FRAMEWORKS = -framework Foundation -framework IOKit -framework CoreFoundation -framework DiskArbitration
 XCTEST_FLAGS = -framework XCTest \
   -F$(shell xcode-select -p)/Platforms/MacOSX.platform/Developer/Library/Frameworks \
   -rpath $(shell xcode-select -p)/Platforms/MacOSX.platform/Developer/Library/Frameworks
