@@ -93,7 +93,7 @@ static void mockReset(void) {
     g_mock.modePage[5] = 0x26; // page length = 10
     // Timer at bytes 14-15 (2-byte BE, in 100ms units). 10 min = 6000
     g_mock.modePage[7] = 0x01; // Standby_z enable
-    g_mock.modePage[14] = (6000 >> 8) & 0xFF;
+    g_mock.modePage[12] = 0; g_mock.modePage[13] = 0; g_mock.modePage[14] = (6000 >> 8) & 0xFF;
     g_mock.modePage[15] = 6000 & 0xFF;
 
     // VPD 0x80: Serial number "ABC12345"
@@ -631,8 +631,8 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 
     XCTAssert(strstr(outBuf, "20 minutes") != NULL);
     // Verify mode page was written with correct timer value (20*600=12000=0x2EE0)
-    UInt16 written = ((UInt16)g_mock.modePage[14]<<8) | g_mock.modePage[15];
-    XCTAssertEqual(written, (UInt16)(20 * 600));
+    UInt32 written = ((UInt32)g_mock.modePage[12]<<24) | ((UInt32)g_mock.modePage[13]<<16) | ((UInt32)g_mock.modePage[14]<<8) | g_mock.modePage[15];
+    XCTAssertEqual(written, (UInt32)(20 * 600));
 }
 
 - (void)testCmdSleepDisablesWithZero {
@@ -644,8 +644,8 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "disabled") != NULL);
-    UInt16 written = ((UInt16)g_mock.modePage[14]<<8) | g_mock.modePage[15];
-    XCTAssertEqual(written, (UInt16)0);
+    UInt32 written = ((UInt32)g_mock.modePage[12]<<24) | ((UInt32)g_mock.modePage[13]<<16) | ((UInt32)g_mock.modePage[14]<<8) | g_mock.modePage[15];
+    XCTAssertEqual(written, (UInt32)0);
 }
 
 // MARK: - Self-Test Commands

@@ -466,14 +466,15 @@ void WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
     }
 
     if (!setValue) {
-        UInt16 timer = ((UInt16)buf[14] << 8) | buf[15];
+        UInt32 timer = ((UInt32)buf[12] << 24) | ((UInt32)buf[13] << 16)
+                     | ((UInt32)buf[14] << 8) | buf[15];
         if (timer == 0)
             printf("Sleep timer: disabled (never)\n");
         else
             printf("Sleep timer: ~%u minutes (%u seconds)\n", timer / 600, timer / 10);
     } else {
         int minutes = atoi(setValue);
-        UInt16 timerVal = (minutes <= 0) ? 0 : (UInt16)(minutes * 600);
+        UInt32 timerVal = (minutes <= 0) ? 0 : (UInt32)minutes * 600;
 
         // Clear mode parameter header and PS bit
         memset(buf, 0, 4);
@@ -485,7 +486,9 @@ void WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
         else
             buf[7] &= ~0x01;
 
-        // Write standby timer
+        // Write standby timer (4-byte BE at offset 12-15)
+        buf[12] = (timerVal >> 24) & 0xFF;
+        buf[13] = (timerVal >> 16) & 0xFF;
         buf[14] = (timerVal >> 8) & 0xFF;
         buf[15] = timerVal & 0xFF;
 

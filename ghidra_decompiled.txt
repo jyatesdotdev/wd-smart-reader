@@ -1,0 +1,1325 @@
+=== EncryptArmWithPassword:passwordLength:onLUN:error: ===
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Function Stack Size: 0x28 bytes */
+
+int WDDevice::EncryptArmWithPassword_passwordLength_onLUN_error_
+              (ID param_1,SEL param_2,char *param_3,unsigned_char param_4,unsigned_int param_5,
+              ID *param_6)
+
+{
+  ulong uVar1;
+  unsigned_long_long uVar2;
+  undefined *puVar3;
+  int iVar4;
+  AnonymousStructure11 *pAVar5;
+  void *pvVar6;
+  undefined1 *puVar7;
+  ID IVar8;
+  ulong uVar9;
+  byte bVar10;
+  ID IVar11;
+  uint uVar12;
+  uint uVar13;
+  uint uVar14;
+  
+  pAVar5 = _calloc(1,0x48);
+  pvVar6 = _calloc(1,0x12);
+  puVar7 = _calloc(1,0x48);
+  if ((byte)param_4 < 0x21) {
+    IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar8 = NSProcessInfo::environment(IVar8);
+    IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+    puVar3 = PTR____stderrp_0004c068;
+    if (IVar8 == 0) {
+      bVar10 = 1;
+    }
+    else {
+      _fwrite("\nWDDevice::EncryptArm",0x15,1,*(FILE **)PTR____stderrp_0004c068);
+      bVar10 = puVar7[3] & 0xef | 1;
+    }
+    *puVar7 = 0x45;
+    puVar7[3] = bVar10;
+    puVar7[6] = 0;
+    puVar7[7] = param_4;
+    ___memcpy_chk(puVar7 + 0x28,param_3,param_4,0x20);
+    pAVar5->field0_0x0[0] = -0x3f;
+    pAVar5->field0_0x0[1] = -0x1e;
+    pAVar5->field0_0x0[6] = (unsigned_char)param_5;
+    pAVar5->field0_0x0[7] = '\0';
+    pAVar5->field0_0x0[8] = 'H';
+    *(void **)((long)&pAVar5->field5_0x2c + 4) = pvVar6;
+    *(undefined1 **)((long)&pAVar5->field6_0x34 + 4) = puVar7;
+    uVar2 = _DAT_0004b1e0;
+    pAVar5->field2_0x18 = _UNK_0004b1e8;
+    pAVar5->field1_0x10 = uVar2;
+    pAVar5->field3_0x20 = 60000;
+    *(undefined4 *)&pAVar5->field8_0x40 = 0;
+    *(undefined8 *)((long)&pAVar5->field4_0x24 + 4) = 10;
+    iVar4 = SendSCSICommand_(param_1,pAVar5);
+    if (*(int *)&pAVar5->field8_0x40 == 0) {
+      uVar9 = 0;
+      uVar12 = iVar4 >> 8;
+      uVar13 = iVar4 >> 0x10;
+      uVar14 = iVar4 >> 0x18;
+      uVar1 = (ulong)iVar4;
+    }
+    else {
+      IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+      IVar8 = NSProcessInfo::environment(IVar8);
+      IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+      if (IVar8 != 0) {
+        _fprintf(*(FILE **)puVar3,
+                 "SCSI Error during EncryptArmWithPassword(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n"
+                );
+      }
+      uVar9 = (ulong)(byte)pAVar5->field8_0x40;
+      uVar12 = (uint)*(byte *)((long)pvVar6 + 2);
+      uVar13 = (uint)*(byte *)((long)pvVar6 + 0xc);
+      uVar14 = (uint)*(byte *)((long)pvVar6 + 0xd);
+      uVar1 = uVar9;
+    }
+    if (param_6 != (ID *)0x0) {
+      IVar11 = *param_6;
+      IVar8 = NSNumber::numberWithUnsignedChar_((ID)PTR__OBJC_CLASS___NSNumber_0005a270,uVar9);
+      objc_stub::setObject_forKey_(IVar11,IVar8,&cf_SCSIStatus);
+      IVar11 = *param_6;
+      IVar8 = NSNumber::numberWithUnsignedChar_
+                        ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar6 + 2))
+      ;
+      objc_stub::setObject_forKey_(IVar11,IVar8,&cf_SCSISenseKey);
+      IVar11 = *param_6;
+      IVar8 = NSNumber::numberWithUnsignedChar_
+                        ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,
+                         (ulong)*(byte *)((long)pvVar6 + 0xc));
+      objc_stub::setObject_forKey_(IVar11,IVar8,&cf_SCSIASC);
+      IVar11 = *param_6;
+      IVar8 = NSNumber::numberWithUnsignedChar_
+                        ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,
+                         (ulong)*(byte *)((long)pvVar6 + 0xd));
+      objc_stub::setObject_forKey_(IVar11,IVar8,&cf_SCSIASCQ);
+    }
+    _free(pAVar5);
+    _free(pvVar6);
+    _free(puVar7);
+    return uVar14 << 0x18 | (uVar13 & 0xff) << 0x10 | (uVar12 & 0xff) << 8 | (uint)uVar1 & 0xff;
+  }
+                    /* WARNING: Subroutine does not return */
+  __WDDevice_SCSICommands__EncryptArmWithPassword_passwordLength_onLUN_error___cold_1();
+}
+
+
+
+=== EncryptArmWithPasswordOptimus:passwordLength:error: ===
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Function Stack Size: 0x24 bytes */
+
+int WDDevice::EncryptArmWithPasswordOptimus_passwordLength_error_
+              (ID param_1,SEL param_2,char *param_3,unsigned_char param_4,ID *param_5)
+
+{
+  ulong uVar1;
+  unsigned_long_long uVar2;
+  int iVar3;
+  AnonymousStructure11 *pAVar4;
+  void *pvVar5;
+  void *pvVar6;
+  ID IVar7;
+  ulong uVar8;
+  ID IVar9;
+  uint uVar10;
+  uint uVar11;
+  uint uVar12;
+  
+  pAVar4 = _calloc(1,0x48);
+  pvVar5 = _calloc(1,0x12);
+  pvVar6 = _calloc(1,0x24);
+  ___memcpy_chk((long)pvVar6 + 2,param_3,param_4,0x22);
+  pAVar4->field0_0x0[0] = -0x4b;
+  pAVar4->field0_0x0[1] = -0x11;
+  pAVar4->field0_0x0[3] = '\x01';
+  pAVar4->field0_0x0[9] = '$';
+  *(void **)((long)&pAVar4->field5_0x2c + 4) = pvVar5;
+  *(void **)((long)&pAVar4->field6_0x34 + 4) = pvVar6;
+  uVar2 = _DAT_0004b1f0;
+  pAVar4->field2_0x18 = _UNK_0004b1f8;
+  pAVar4->field1_0x10 = uVar2;
+  pAVar4->field3_0x20 = 60000;
+  *(undefined8 *)((long)&pAVar4->field4_0x24 + 4) = 0xc;
+  iVar3 = SendSCSICommand_(param_1,pAVar4);
+  if (*(int *)&pAVar4->field8_0x40 == 0) {
+    uVar8 = 0;
+    uVar10 = iVar3 >> 8;
+    uVar11 = iVar3 >> 0x10;
+    uVar12 = iVar3 >> 0x18;
+    uVar1 = (ulong)iVar3;
+  }
+  else {
+    IVar7 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar7 = NSProcessInfo::environment(IVar7);
+    IVar7 = NSProcessInfo::objectForKey_(IVar7,&cf_WD_DEBUG);
+    if (IVar7 != 0) {
+      _fprintf(*(FILE **)PTR____stderrp_0004c068,
+               "SCSI Error during EncryptArmWithPasswordOptimus(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n"
+              );
+    }
+    uVar8 = (ulong)(byte)pAVar4->field8_0x40;
+    uVar10 = (uint)*(byte *)((long)pvVar5 + 2);
+    uVar11 = (uint)*(byte *)((long)pvVar5 + 0xc);
+    uVar12 = (uint)*(byte *)((long)pvVar5 + 0xd);
+    uVar1 = uVar8;
+  }
+  if (param_5 != (ID *)0x0) {
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_((ID)PTR__OBJC_CLASS___NSNumber_0005a270,uVar8);
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIStatus);
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 2));
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSISenseKey);
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 0xc))
+    ;
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIASC);
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 0xd))
+    ;
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIASCQ);
+  }
+  _free(pAVar4);
+  _free(pvVar5);
+  _free(pvVar6);
+  return (uVar11 & 0xff) << 0x10 | uVar12 << 0x18 | (uVar10 & 0xff) << 8 | (uint)uVar1 & 0xff;
+}
+
+
+
+=== EncryptDisArmWithPassword:passwordLength:onLUN:error: ===
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Function Stack Size: 0x28 bytes */
+
+int WDDevice::EncryptDisArmWithPassword_passwordLength_onLUN_error_
+              (ID param_1,SEL param_2,char *param_3,unsigned_char param_4,unsigned_int param_5,
+              ID *param_6)
+
+{
+  unsigned_long_long uVar1;
+  undefined *puVar2;
+  int iVar3;
+  AnonymousStructure11 *pAVar4;
+  void *pvVar5;
+  undefined1 *puVar6;
+  ID IVar7;
+  ulong uVar9;
+  byte bVar10;
+  ID IVar11;
+  uint uVar12;
+  uint uVar13;
+  uint uVar14;
+  ulong uVar8;
+  
+  pAVar4 = _calloc(1,0x48);
+  pvVar5 = _calloc(1,0x12);
+  puVar6 = _calloc(1,0x48);
+  if ((byte)param_4 < 0x21) {
+    IVar7 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar7 = NSProcessInfo::environment(IVar7);
+    IVar7 = NSProcessInfo::objectForKey_(IVar7,&cf_WD_DEBUG);
+    puVar2 = PTR____stderrp_0004c068;
+    if (IVar7 == 0) {
+      bVar10 = 0x10;
+    }
+    else {
+      _fwrite("\nEncryptDisArmWithPassword:passwordLength:error:",0x30,1,
+              *(FILE **)PTR____stderrp_0004c068);
+      bVar10 = puVar6[3] & 0xfe | 0x10;
+    }
+    *puVar6 = 0x45;
+    puVar6[3] = bVar10;
+    puVar6[6] = 0;
+    puVar6[7] = param_4;
+    ___memcpy_chk(puVar6 + 8,param_3,param_4,0x40);
+    pAVar4->field0_0x0[0] = -0x3f;
+    pAVar4->field0_0x0[1] = -0x1e;
+    pAVar4->field0_0x0[6] = (unsigned_char)param_5;
+    pAVar4->field0_0x0[7] = '\0';
+    pAVar4->field0_0x0[8] = 'H';
+    *(void **)((long)&pAVar4->field5_0x2c + 4) = pvVar5;
+    *(undefined1 **)((long)&pAVar4->field6_0x34 + 4) = puVar6;
+    uVar1 = _DAT_0004b1e0;
+    pAVar4->field2_0x18 = _UNK_0004b1e8;
+    pAVar4->field1_0x10 = uVar1;
+    pAVar4->field3_0x20 = 60000;
+    *(undefined4 *)&pAVar4->field8_0x40 = 0;
+    *(undefined8 *)((long)&pAVar4->field4_0x24 + 4) = 10;
+    iVar3 = SendSCSICommand_(param_1,pAVar4);
+    uVar8 = (ulong)iVar3;
+    if ((*(int *)&pAVar4->field8_0x40 == 0) && (*(char *)((long)pvVar5 + 2) == '\0')) {
+      uVar9 = 0;
+      uVar12 = iVar3 >> 8;
+      uVar13 = iVar3 >> 0x10;
+      uVar14 = iVar3 >> 0x18;
+    }
+    else {
+      IVar7 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+      IVar7 = NSProcessInfo::environment(IVar7);
+      IVar7 = NSProcessInfo::objectForKey_(IVar7,&cf_WD_DEBUG);
+      if (IVar7 != 0) {
+        _fprintf(*(FILE **)puVar2,
+                 "SCSI Error during EncryptDisArm(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n\n"
+                );
+      }
+      uVar9 = (ulong)(byte)pAVar4->field8_0x40;
+      uVar12 = (uint)*(byte *)((long)pvVar5 + 2);
+      uVar13 = (uint)*(byte *)((long)pvVar5 + 0xc);
+      uVar14 = (uint)*(byte *)((long)pvVar5 + 0xd);
+      uVar8 = uVar9;
+    }
+    if (param_6 != (ID *)0x0) {
+      IVar11 = *param_6;
+      IVar7 = NSNumber::numberWithUnsignedChar_((ID)PTR__OBJC_CLASS___NSNumber_0005a270,uVar9);
+      objc_stub::setObject_forKey_(IVar11,IVar7,&cf_SCSIStatus);
+      IVar11 = *param_6;
+      IVar7 = NSNumber::numberWithUnsignedChar_
+                        ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 2))
+      ;
+      objc_stub::setObject_forKey_(IVar11,IVar7,&cf_SCSISenseKey);
+      IVar11 = *param_6;
+      IVar7 = NSNumber::numberWithUnsignedChar_
+                        ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,
+                         (ulong)*(byte *)((long)pvVar5 + 0xc));
+      objc_stub::setObject_forKey_(IVar11,IVar7,&cf_SCSIASC);
+      IVar11 = *param_6;
+      IVar7 = NSNumber::numberWithUnsignedChar_
+                        ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,
+                         (ulong)*(byte *)((long)pvVar5 + 0xd));
+      objc_stub::setObject_forKey_(IVar11,IVar7,&cf_SCSIASCQ);
+    }
+    _free(pAVar4);
+    _free(pvVar5);
+    return uVar14 << 0x18 | (uVar13 & 0xff) << 0x10 | (uVar12 & 0xff) << 8 | (uint)uVar8 & 0xff;
+  }
+                    /* WARNING: Subroutine does not return */
+  __WDDevice_SCSICommands__EncryptDisArmWithPassword_passwordLength_onLUN_error___cold_1();
+}
+
+
+
+=== EncryptDisArmWithPasswordOptimus:passwordLength:error: ===
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Function Stack Size: 0x24 bytes */
+
+int WDDevice::EncryptDisArmWithPasswordOptimus_passwordLength_error_
+              (ID param_1,SEL param_2,char *param_3,unsigned_char param_4,ID *param_5)
+
+{
+  unsigned_long_long uVar1;
+  int iVar2;
+  AnonymousStructure11 *pAVar3;
+  void *pvVar4;
+  void *pvVar5;
+  ID IVar7;
+  ulong uVar8;
+  ID IVar9;
+  uint uVar10;
+  uint uVar11;
+  uint uVar12;
+  ulong uVar6;
+  
+  pAVar3 = _calloc(1,0x48);
+  pvVar4 = _calloc(1,0x12);
+  pvVar5 = _calloc(1,0x24);
+  ___memcpy_chk((long)pvVar5 + 2,param_3,param_4,0x22);
+  pAVar3->field0_0x0[0] = -0x4b;
+  pAVar3->field0_0x0[1] = -0x11;
+  pAVar3->field0_0x0[3] = '\x06';
+  pAVar3->field0_0x0[9] = '$';
+  *(void **)((long)&pAVar3->field5_0x2c + 4) = pvVar4;
+  *(void **)((long)&pAVar3->field6_0x34 + 4) = pvVar5;
+  uVar1 = _DAT_0004b1f0;
+  pAVar3->field2_0x18 = _UNK_0004b1f8;
+  pAVar3->field1_0x10 = uVar1;
+  pAVar3->field3_0x20 = 60000;
+  *(undefined8 *)((long)&pAVar3->field4_0x24 + 4) = 0xc;
+  iVar2 = SendSCSICommand_(param_1,pAVar3);
+  uVar6 = (ulong)iVar2;
+  if ((*(int *)&pAVar3->field8_0x40 == 0) && (*(char *)((long)pvVar4 + 2) == '\0')) {
+    uVar8 = 0;
+    uVar10 = iVar2 >> 8;
+    uVar11 = iVar2 >> 0x10;
+    uVar12 = iVar2 >> 0x18;
+  }
+  else {
+    IVar7 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar7 = NSProcessInfo::environment(IVar7);
+    IVar7 = NSProcessInfo::objectForKey_(IVar7,&cf_WD_DEBUG);
+    if (IVar7 != 0) {
+      _fprintf(*(FILE **)PTR____stderrp_0004c068,
+               "SCSI Error during EncryptDisArm(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n\n"
+              );
+    }
+    uVar8 = (ulong)(byte)pAVar3->field8_0x40;
+    uVar10 = (uint)*(byte *)((long)pvVar4 + 2);
+    uVar11 = (uint)*(byte *)((long)pvVar4 + 0xc);
+    uVar12 = (uint)*(byte *)((long)pvVar4 + 0xd);
+    uVar6 = uVar8;
+  }
+  if (param_5 != (ID *)0x0) {
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_((ID)PTR__OBJC_CLASS___NSNumber_0005a270,uVar8);
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIStatus);
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar4 + 2));
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSISenseKey);
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar4 + 0xc))
+    ;
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIASC);
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar4 + 0xd))
+    ;
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIASCQ);
+  }
+  _free(pAVar3);
+  _free(pvVar4);
+  _free(pvVar5);
+  return (uVar11 & 0xff) << 0x10 | uVar12 << 0x18 | (uVar10 & 0xff) << 8 | (uint)uVar6 & 0xff;
+}
+
+
+
+=== EncryptUnlockWithPassword:passwordLength:onLUN:error: ===
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Function Stack Size: 0x28 bytes */
+
+int WDDevice::EncryptUnlockWithPassword_passwordLength_onLUN_error_
+              (ID param_1,SEL param_2,char *param_3,unsigned_char param_4,unsigned_int param_5,
+              ID *param_6)
+
+{
+  ulong uVar1;
+  unsigned_long_long uVar2;
+  undefined *puVar3;
+  int iVar4;
+  AnonymousStructure11 *pAVar5;
+  void *pvVar6;
+  undefined1 *puVar7;
+  ID IVar8;
+  ulong uVar9;
+  ID IVar10;
+  uint uVar11;
+  uint uVar12;
+  uint uVar13;
+  
+  pAVar5 = _calloc(1,0x48);
+  pvVar6 = _calloc(1,0x12);
+  puVar7 = _calloc(1,0x28);
+  IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+  IVar8 = NSProcessInfo::environment(IVar8);
+  IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+  puVar3 = PTR____stderrp_0004c068;
+  if (IVar8 != 0) {
+    _fwrite("\nWDUnlockDrive::EncryptUnlock",0x1d,1,*(FILE **)PTR____stderrp_0004c068);
+  }
+  *puVar7 = 0x45;
+  puVar7[6] = 0;
+  puVar7[7] = param_4;
+  ___memcpy_chk(puVar7 + 8,param_3,param_4,0x20);
+  pAVar5->field0_0x0[0] = -0x3f;
+  pAVar5->field0_0x0[1] = -0x1f;
+  pAVar5->field0_0x0[6] = (unsigned_char)param_5;
+  pAVar5->field0_0x0[7] = '\0';
+  pAVar5->field0_0x0[8] = '(';
+  *(void **)((long)&pAVar5->field5_0x2c + 4) = pvVar6;
+  *(undefined1 **)((long)&pAVar5->field6_0x34 + 4) = puVar7;
+  uVar2 = _DAT_0004b220;
+  pAVar5->field2_0x18 = _UNK_0004b228;
+  pAVar5->field1_0x10 = uVar2;
+  pAVar5->field3_0x20 = 30000;
+  *(undefined4 *)&pAVar5->field8_0x40 = 0;
+  *(undefined8 *)((long)&pAVar5->field4_0x24 + 4) = 10;
+  iVar4 = SendSCSICommand_(param_1,pAVar5);
+  if (*(int *)&pAVar5->field8_0x40 == 0) {
+    uVar9 = 0;
+    uVar11 = iVar4 >> 8;
+    uVar12 = iVar4 >> 0x10;
+    uVar13 = iVar4 >> 0x18;
+    uVar1 = (ulong)iVar4;
+  }
+  else {
+    IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar8 = NSProcessInfo::environment(IVar8);
+    IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+    if (IVar8 != 0) {
+      _fprintf(*(FILE **)puVar3,
+               "SCSI Error during EncryptUnlock(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n"
+              );
+    }
+    uVar9 = (ulong)(byte)pAVar5->field8_0x40;
+    uVar11 = (uint)*(byte *)((long)pvVar6 + 2);
+    uVar12 = (uint)*(byte *)((long)pvVar6 + 0xc);
+    uVar13 = (uint)*(byte *)((long)pvVar6 + 0xd);
+    uVar1 = uVar9;
+  }
+  if (param_6 != (ID *)0x0) {
+    IVar10 = *param_6;
+    IVar8 = NSNumber::numberWithUnsignedChar_((ID)PTR__OBJC_CLASS___NSNumber_0005a270,uVar9);
+    objc_stub::setObject_forKey_(IVar10,IVar8,&cf_SCSIStatus);
+    IVar10 = *param_6;
+    IVar8 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar6 + 2));
+    objc_stub::setObject_forKey_(IVar10,IVar8,&cf_SCSISenseKey);
+    IVar10 = *param_6;
+    IVar8 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar6 + 0xc))
+    ;
+    objc_stub::setObject_forKey_(IVar10,IVar8,&cf_SCSIASC);
+    IVar10 = *param_6;
+    IVar8 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar6 + 0xd))
+    ;
+    objc_stub::setObject_forKey_(IVar10,IVar8,&cf_SCSIASCQ);
+  }
+  _free(pAVar5);
+  _free(pvVar6);
+  _free(puVar7);
+  return (uVar12 & 0xff) << 0x10 | uVar13 << 0x18 | (uVar11 & 0xff) << 8 | (uint)uVar1 & 0xff;
+}
+
+
+
+=== EncryptUnlockWithPasswordOptimus:passwordLength:error: ===
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Function Stack Size: 0x24 bytes */
+
+int WDDevice::EncryptUnlockWithPasswordOptimus_passwordLength_error_
+              (ID param_1,SEL param_2,char *param_3,unsigned_char param_4,ID *param_5)
+
+{
+  ulong uVar1;
+  unsigned_long_long uVar2;
+  int iVar3;
+  AnonymousStructure11 *pAVar4;
+  void *pvVar5;
+  void *pvVar6;
+  ID IVar7;
+  ulong uVar8;
+  ID IVar9;
+  uint uVar10;
+  uint uVar11;
+  uint uVar12;
+  
+  pAVar4 = _calloc(1,0x48);
+  pvVar5 = _calloc(1,0x12);
+  pvVar6 = _calloc(1,0x24);
+  ___memcpy_chk((long)pvVar6 + 2,param_3,param_4,0x22);
+  pAVar4->field0_0x0[0] = -0x4b;
+  pAVar4->field0_0x0[1] = -0x11;
+  pAVar4->field0_0x0[3] = '\x02';
+  pAVar4->field0_0x0[9] = '$';
+  *(void **)((long)&pAVar4->field5_0x2c + 4) = pvVar5;
+  *(void **)((long)&pAVar4->field6_0x34 + 4) = pvVar6;
+  uVar2 = _DAT_0004b1f0;
+  pAVar4->field2_0x18 = _UNK_0004b1f8;
+  pAVar4->field1_0x10 = uVar2;
+  pAVar4->field3_0x20 = 60000;
+  *(undefined8 *)((long)&pAVar4->field4_0x24 + 4) = 0xc;
+  iVar3 = SendSCSICommand_(param_1,pAVar4);
+  if (*(int *)&pAVar4->field8_0x40 == 0) {
+    uVar8 = 0;
+    uVar10 = iVar3 >> 8;
+    uVar11 = iVar3 >> 0x10;
+    uVar12 = iVar3 >> 0x18;
+    uVar1 = (ulong)iVar3;
+  }
+  else {
+    IVar7 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar7 = NSProcessInfo::environment(IVar7);
+    IVar7 = NSProcessInfo::objectForKey_(IVar7,&cf_WD_DEBUG);
+    if (IVar7 != 0) {
+      _fprintf(*(FILE **)PTR____stderrp_0004c068,
+               "SCSI Error during EncryptUnlock(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n"
+              );
+    }
+    uVar8 = (ulong)(byte)pAVar4->field8_0x40;
+    uVar10 = (uint)*(byte *)((long)pvVar5 + 2);
+    uVar11 = (uint)*(byte *)((long)pvVar5 + 0xc);
+    uVar12 = (uint)*(byte *)((long)pvVar5 + 0xd);
+    uVar1 = uVar8;
+  }
+  if (param_5 != (ID *)0x0) {
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_((ID)PTR__OBJC_CLASS___NSNumber_0005a270,uVar8);
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIStatus);
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 2));
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSISenseKey);
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 0xc))
+    ;
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIASC);
+    IVar9 = *param_5;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 0xd))
+    ;
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIASCQ);
+  }
+  _free(pAVar4);
+  _free(pvVar5);
+  _free(pvVar6);
+  return uVar12 << 0x18 | (uVar11 & 0xff) << 0x10 | (uVar10 & 0xff) << 8 | (uint)uVar1 & 0xff;
+}
+
+
+
+=== EncryptResetDEK:onLUN:error: ===
+
+/* Function Stack Size: 0x24 bytes */
+
+int WDDevice::EncryptResetDEK_onLUN_error_
+              (ID param_1,SEL param_2,unsigned_int *param_3,unsigned_int param_4,ID *param_5)
+
+{
+  bool bVar1;
+  int iVar2;
+  int iVar3;
+  AnonymousStructure11 *pAVar4;
+  void *pvVar5;
+  undefined1 *puVar6;
+  AnonymousStructure1 *pAVar7;
+  ID IVar8;
+  FILE *pFVar9;
+  int iVar10;
+  char cVar11;
+  uint uVar12;
+  long lVar13;
+  ID IVar14;
+  uint uVar15;
+  uint uVar16;
+  long local_70;
+  
+  pAVar4 = _calloc(1,0x48);
+  pvVar5 = _calloc(1,0x12);
+  puVar6 = _calloc(1,0x28);
+  pAVar7 = _calloc(1,0x20);
+  local_70 = 0;
+  iVar10 = 1;
+  do {
+    IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar8 = NSProcessInfo::environment(IVar8);
+    IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+    if (IVar8 != 0) {
+      _fwrite("\nWDDevice::EncryptResetDEK",0x1a,1,*(FILE **)PTR____stderrp_0004c068);
+    }
+    iVar2 = EncryptGetStatus_onLUN_error_(param_1,pAVar7,param_4,(ID *)0x0);
+    if (iVar2 == 0) {
+      *puVar6 = 0x45;
+      puVar6[3] = puVar6[3] | 1;
+      cVar11 = pAVar7->field3_0x4;
+      if (cVar11 == '\x01') {
+        local_70 = 0;
+        puVar6[4] = 1;
+      }
+      else if ((cVar11 == '1') || (cVar11 == '0')) {
+        puVar6[4] = cVar11;
+        puVar6[8] = 0;
+        puVar6[0xc] = 0;
+        puVar6[0x10] = 0;
+        puVar6[0x14] = 0;
+        puVar6[0x18] = 0;
+        puVar6[0x1c] = 0;
+        puVar6[0x20] = 0;
+        puVar6[0x24] = 0;
+      }
+      else {
+        iVar3 = *(int *)(param_1 + (long)mProductID);
+        if ((iVar3 == 0x111 || iVar3 == 0x25f7) || (iVar3 == 0xa12)) {
+          puVar6[4] = 0;
+          *(undefined2 *)(puVar6 + 6) = 0;
+        }
+        else {
+          pFVar9 = _fopen("/dev/random","r");
+          if (pFVar9 == (FILE *)0x0) {
+            IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+            IVar8 = NSProcessInfo::environment(IVar8);
+            IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+            if (IVar8 != 0) {
+              _perror("randgetter");
+            }
+                    /* WARNING: Subroutine does not return */
+            _exit(-1);
+          }
+          lVar13 = 0;
+          cVar11 = pAVar7->field3_0x4;
+          if (cVar11 != '(') {
+            cVar11 = ' ';
+          }
+          puVar6[4] = cVar11;
+          do {
+            iVar3 = _fgetc(pFVar9);
+            puVar6[lVar13 + 8] = (char)iVar3;
+            lVar13 = lVar13 + 1;
+          } while (lVar13 != 0x20);
+          _fclose(pFVar9);
+          *(undefined2 *)(puVar6 + 6) = 1;
+          local_70 = 0x20;
+        }
+      }
+      pAVar4->field0_0x0[0] = -0x3f;
+      pAVar4->field0_0x0[1] = -0x1d;
+      *(undefined4 *)(pAVar4->field0_0x0 + 2) = *(undefined4 *)pAVar7->field6_0x8;
+      pAVar4->field0_0x0[6] = (unsigned_char)param_4;
+      pAVar4->field0_0x0[7] = '\0';
+      pAVar4->field0_0x0[8] = (unsigned_char)(local_70 + 8U);
+      pAVar4->field0_0x0[9] = '\0';
+      *(void **)((long)&pAVar4->field5_0x2c + 4) = pvVar5;
+      *(undefined1 **)((long)&pAVar4->field6_0x34 + 4) = puVar6;
+      pAVar4->field1_0x10 = local_70 + 8U;
+      pAVar4->field2_0x18 = 1;
+      pAVar4->field3_0x20 = 60000;
+      *(undefined4 *)&pAVar4->field8_0x40 = 0;
+      *(undefined8 *)((long)&pAVar4->field4_0x24 + 4) = 10;
+      iVar2 = SendSCSICommand_(param_1,pAVar4);
+      if ((*(int *)&pAVar4->field8_0x40 == 0) && (*(char *)((long)pvVar5 + 2) == '\0')) {
+        uVar15 = iVar2 >> 8;
+        uVar16 = iVar2 >> 0x10;
+        uVar12 = iVar2 >> 0x18;
+        goto LAB_00009518;
+      }
+      IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+      IVar8 = NSProcessInfo::environment(IVar8);
+      IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+      if (IVar8 != 0) {
+        _fprintf(*(FILE **)PTR____stderrp_0004c068,
+                 "SCSI Error during EncryptResetKey(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n"
+                );
+      }
+      iVar2 = (int)(byte)pAVar4->field8_0x40;
+      uVar15 = (uint)*(byte *)((long)pvVar5 + 2);
+      uVar16 = (uint)*(byte *)((long)pvVar5 + 0xc);
+      uVar12 = (uint)*(byte *)((long)pvVar5 + 0xd);
+    }
+    else {
+      uVar15 = iVar2 >> 8;
+      uVar16 = iVar2 >> 0x10;
+      uVar12 = iVar2 >> 0x18;
+    }
+    bVar1 = iVar10 == 0;
+    iVar10 = iVar10 + -1;
+    if (bVar1) {
+LAB_00009518:
+      if (param_5 != (ID *)0x0) {
+        IVar14 = *param_5;
+        IVar8 = NSNumber::numberWithUnsignedChar_
+                          ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)(byte)pAVar4->field8_0x40)
+        ;
+        objc_stub::setObject_forKey_(IVar14,IVar8,&cf_SCSIStatus);
+        IVar14 = *param_5;
+        IVar8 = NSNumber::numberWithUnsignedChar_
+                          ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,
+                           (ulong)*(byte *)((long)pvVar5 + 2));
+        objc_stub::setObject_forKey_(IVar14,IVar8,&cf_SCSISenseKey);
+        IVar14 = *param_5;
+        IVar8 = NSNumber::numberWithUnsignedChar_
+                          ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,
+                           (ulong)*(byte *)((long)pvVar5 + 0xc));
+        objc_stub::setObject_forKey_(IVar14,IVar8,&cf_SCSIASC);
+        IVar14 = *param_5;
+        IVar8 = NSNumber::numberWithUnsignedChar_
+                          ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,
+                           (ulong)*(byte *)((long)pvVar5 + 0xd));
+        objc_stub::setObject_forKey_(IVar14,IVar8,&cf_SCSIASCQ);
+      }
+      _free(pAVar4);
+      _free(pvVar5);
+      _free(puVar6);
+      _free(pAVar7);
+      return (uVar16 & 0xff) << 0x10 | uVar12 << 0x18 | (uVar15 & 0xff) << 8 | iVar2 & 0xff;
+    }
+  } while( true );
+}
+
+
+
+=== EncryptResetDEKPrepareOptimus: ===
+
+/* Function Stack Size: 0x18 bytes */
+
+int WDDevice::EncryptResetDEKPrepareOptimus_(ID param_1,SEL param_2,ID *param_3)
+
+{
+  ulong uVar1;
+  int iVar2;
+  AnonymousStructure11 *pAVar3;
+  void *pvVar4;
+  ID IVar5;
+  ulong uVar6;
+  ID IVar7;
+  uint uVar8;
+  uint uVar9;
+  uint uVar10;
+  
+  pAVar3 = _calloc(1,0x48);
+  pvVar4 = _calloc(1,0x12);
+  pAVar3->field0_0x0[0] = -0x4b;
+  pAVar3->field0_0x0[1] = -0x11;
+  pAVar3->field0_0x0[3] = '\x03';
+  pAVar3->field2_0x18 = 1;
+  pAVar3->field3_0x20 = 60000;
+  *(undefined8 *)((long)&pAVar3->field4_0x24 + 4) = 0xc;
+  *(void **)((long)&pAVar3->field5_0x2c + 4) = pvVar4;
+  iVar2 = SendSCSICommand_(param_1,pAVar3);
+  if (*(int *)&pAVar3->field8_0x40 == 0) {
+    uVar6 = 0;
+    uVar8 = iVar2 >> 8;
+    uVar9 = iVar2 >> 0x10;
+    uVar10 = iVar2 >> 0x18;
+    uVar1 = (ulong)iVar2;
+  }
+  else {
+    IVar5 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar5 = NSProcessInfo::environment(IVar5);
+    IVar5 = NSProcessInfo::objectForKey_(IVar5,&cf_WD_DEBUG);
+    if (IVar5 != 0) {
+      _fprintf(*(FILE **)PTR____stderrp_0004c068,
+               "SCSI Error during EncryptResetDEKPrepareOptimus(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n"
+              );
+    }
+    uVar6 = (ulong)(byte)pAVar3->field8_0x40;
+    uVar8 = (uint)*(byte *)((long)pvVar4 + 2);
+    uVar9 = (uint)*(byte *)((long)pvVar4 + 0xc);
+    uVar10 = (uint)*(byte *)((long)pvVar4 + 0xd);
+    uVar1 = uVar6;
+  }
+  if (param_3 != (ID *)0x0) {
+    IVar7 = *param_3;
+    IVar5 = NSNumber::numberWithUnsignedChar_((ID)PTR__OBJC_CLASS___NSNumber_0005a270,uVar6);
+    objc_stub::setObject_forKey_(IVar7,IVar5,&cf_SCSIStatus);
+    IVar7 = *param_3;
+    IVar5 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar4 + 2));
+    objc_stub::setObject_forKey_(IVar7,IVar5,&cf_SCSISenseKey);
+    IVar7 = *param_3;
+    IVar5 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar4 + 0xc))
+    ;
+    objc_stub::setObject_forKey_(IVar7,IVar5,&cf_SCSIASC);
+    IVar7 = *param_3;
+    IVar5 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar4 + 0xd))
+    ;
+    objc_stub::setObject_forKey_(IVar7,IVar5,&cf_SCSIASCQ);
+  }
+  _free(pAVar3);
+  _free(pvVar4);
+  return (uVar9 & 0xff) << 0x10 | uVar10 << 0x18 | (uVar8 & 0xff) << 8 | (uint)uVar1 & 0xff;
+}
+
+
+
+=== EncryptResetDEKOptimus: ===
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Function Stack Size: 0x18 bytes */
+
+int WDDevice::EncryptResetDEKOptimus_(ID param_1,SEL param_2,ID *param_3)
+
+{
+  ulong uVar1;
+  unsigned_long_long uVar2;
+  int iVar3;
+  AnonymousStructure11 *pAVar4;
+  void *pvVar5;
+  undefined2 *puVar6;
+  ID IVar7;
+  ulong uVar8;
+  ID IVar9;
+  uint uVar10;
+  uint uVar11;
+  uint uVar12;
+  
+  pAVar4 = _calloc(1,0x48);
+  pvVar5 = _calloc(1,0x12);
+  puVar6 = _calloc(1,0x24);
+  *puVar6 = 0x101;
+  *(undefined8 *)(puVar6 + 5) = 0x2020202020202020;
+  *(undefined8 *)(puVar6 + 1) = 0x2020202020202020;
+  *(undefined8 *)(puVar6 + 0xd) = 0x2020202020202020;
+  *(undefined8 *)(puVar6 + 9) = 0x2020202020202020;
+  pAVar4->field0_0x0[0] = -0x4b;
+  pAVar4->field0_0x0[1] = -0x11;
+  pAVar4->field0_0x0[3] = '\x04';
+  pAVar4->field0_0x0[5] = '\x01';
+  pAVar4->field0_0x0[9] = '$';
+  *(void **)((long)&pAVar4->field5_0x2c + 4) = pvVar5;
+  *(undefined2 **)((long)&pAVar4->field6_0x34 + 4) = puVar6;
+  uVar2 = _DAT_0004b1f0;
+  pAVar4->field2_0x18 = _UNK_0004b1f8;
+  pAVar4->field1_0x10 = uVar2;
+  pAVar4->field3_0x20 = 60000;
+  *(undefined8 *)((long)&pAVar4->field4_0x24 + 4) = 0xc;
+  iVar3 = SendSCSICommand_(param_1,pAVar4);
+  if (*(int *)&pAVar4->field8_0x40 == 0) {
+    uVar8 = 0;
+    uVar10 = iVar3 >> 8;
+    uVar11 = iVar3 >> 0x10;
+    uVar12 = iVar3 >> 0x18;
+    uVar1 = (ulong)iVar3;
+  }
+  else {
+    IVar7 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar7 = NSProcessInfo::environment(IVar7);
+    IVar7 = NSProcessInfo::objectForKey_(IVar7,&cf_WD_DEBUG);
+    if (IVar7 != 0) {
+      _fprintf(*(FILE **)PTR____stderrp_0004c068,
+               "SCSI Error during EncryptResetDEKOptimus(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n"
+              );
+    }
+    uVar8 = (ulong)(byte)pAVar4->field8_0x40;
+    uVar10 = (uint)*(byte *)((long)pvVar5 + 2);
+    uVar11 = (uint)*(byte *)((long)pvVar5 + 0xc);
+    uVar12 = (uint)*(byte *)((long)pvVar5 + 0xd);
+    uVar1 = uVar8;
+  }
+  if (param_3 != (ID *)0x0) {
+    IVar9 = *param_3;
+    IVar7 = NSNumber::numberWithUnsignedChar_((ID)PTR__OBJC_CLASS___NSNumber_0005a270,uVar8);
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIStatus);
+    IVar9 = *param_3;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 2));
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSISenseKey);
+    IVar9 = *param_3;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 0xc))
+    ;
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIASC);
+    IVar9 = *param_3;
+    IVar7 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar5 + 0xd))
+    ;
+    objc_stub::setObject_forKey_(IVar9,IVar7,&cf_SCSIASCQ);
+  }
+  _free(pAVar4);
+  _free(pvVar5);
+  _free(puVar6);
+  return (uVar11 & 0xff) << 0x10 | uVar12 << 0x18 | (uVar10 & 0xff) << 8 | (uint)uVar1 & 0xff;
+}
+
+
+
+=== ConfigSetDriveSleepTimer:error: ===
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Function Stack Size: 0x1c bytes */
+
+int WDDevice::ConfigSetDriveSleepTimer_error_
+              (ID param_1,SEL param_2,unsigned_char param_3,ID *param_4)
+
+{
+  int iVar1;
+  unsigned_long_long uVar2;
+  undefined *puVar3;
+  int iVar4;
+  AnonymousStructure11 *pAVar5;
+  void *pvVar6;
+  undefined4 *puVar7;
+  ID IVar8;
+  FILE *pFVar9;
+  char *pcVar11;
+  ulong uVar12;
+  ID IVar13;
+  uint uVar14;
+  uint uVar15;
+  uint uVar16;
+  ulong uVar10;
+  
+  pAVar5 = _calloc(1,0x48);
+  pvVar6 = _calloc(1,0x12);
+  puVar7 = _calloc(1,0x2c);
+  IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+  IVar8 = NSProcessInfo::environment(IVar8);
+  IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+  puVar3 = PTR____stderrp_0004c068;
+  if (IVar8 != 0) {
+    _fwrite("\nWDDevice::ConfigSetDriveSleepTimer",0x23,1,*(FILE **)PTR____stderrp_0004c068);
+  }
+  builtin_memcpy(pAVar5->field0_0x0,"\x1a\b\x1a",4);
+  pAVar5->field0_0x0[4] = ',';
+  pAVar5->field0_0x0[5] = '\0';
+  *(void **)((long)&pAVar5->field5_0x2c + 4) = pvVar6;
+  *(undefined4 **)((long)&pAVar5->field6_0x34 + 4) = puVar7;
+  uVar2 = _DAT_0004b2b0;
+  pAVar5->field2_0x18 = _UNK_0004b2b8;
+  pAVar5->field1_0x10 = uVar2;
+  pAVar5->field3_0x20 = 60000;
+  *(undefined4 *)&pAVar5->field8_0x40 = 0;
+  *(undefined8 *)((long)&pAVar5->field4_0x24 + 4) = 6;
+  SendSCSICommand_(param_1,pAVar5);
+  if ((*(int *)&pAVar5->field8_0x40 == 0) && (*(char *)((long)pvVar6 + 2) == '\0')) {
+    *puVar7 = 0;
+    if ((byte)param_3 == 0) {
+      uVar14 = puVar7[1] & 0xfeffff40 | 0x1a;
+      puVar7[1] = uVar14;
+    }
+    else {
+      uVar14 = puVar7[1] & 0xfeffff40 | 0x100001a;
+      puVar7[1] = uVar14;
+      iVar1 = (uint)(byte)param_3 * 600;
+      *(undefined1 *)(puVar7 + 3) = 0;
+      *(char *)((long)puVar7 + 0xd) = (char)((uint)iVar1 >> 0x10);
+      *(char *)((long)puVar7 + 0xe) = (char)((uint)iVar1 >> 8);
+      *(char *)((long)puVar7 + 0xf) = (char)iVar1;
+    }
+    pAVar5->field0_0x0[0] = '\x15';
+    pAVar5->field0_0x0[1] = '\x11';
+    pAVar5->field0_0x0[2] = '\0';
+    pAVar5->field0_0x0[3] = '\0';
+    pAVar5->field0_0x0[4] = (char)(uVar14 >> 8) + '\x06';
+    pAVar5->field0_0x0[5] = '\0';
+    *(void **)((long)&pAVar5->field5_0x2c + 4) = pvVar6;
+    *(undefined4 **)((long)&pAVar5->field6_0x34 + 4) = puVar7;
+    pAVar5->field1_0x10 = (ulong)((uVar14 >> 8 & 0xff) + 6);
+    pAVar5->field2_0x18 = 1;
+    pAVar5->field3_0x20 = 60000;
+    *(undefined4 *)&pAVar5->field8_0x40 = 0;
+    *(undefined8 *)((long)&pAVar5->field4_0x24 + 4) = 6;
+    iVar4 = SendSCSICommand_(param_1,pAVar5);
+    uVar10 = (ulong)iVar4;
+    if ((*(int *)&pAVar5->field8_0x40 == 0) && (*(char *)((long)pvVar6 + 2) == '\0')) {
+      uVar12 = 0;
+      uVar14 = iVar4 >> 8;
+      uVar15 = iVar4 >> 0x10;
+      uVar16 = iVar4 >> 0x18;
+      goto joined_r0x0000db7c;
+    }
+    IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar8 = NSProcessInfo::environment(IVar8);
+    IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+    if (IVar8 != 0) {
+      pFVar9 = *(FILE **)puVar3;
+      pcVar11 = 
+      "SCSI Error during ConfigSetDriveSleepTimer(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n"
+      ;
+      goto LAB_0000db64;
+    }
+  }
+  else {
+    IVar8 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar8 = NSProcessInfo::environment(IVar8);
+    IVar8 = NSProcessInfo::objectForKey_(IVar8,&cf_WD_DEBUG);
+    if (IVar8 != 0) {
+      pFVar9 = *(FILE **)puVar3;
+      pcVar11 = 
+      "SCSI Error during ConfigGetDriveSleepTimer(): Status = %d SCSI Status = %X SCSI Sense Key = %X ASC = %X ASCQ = %X\n"
+      ;
+LAB_0000db64:
+      _fprintf(pFVar9,pcVar11);
+    }
+  }
+  uVar12 = (ulong)(byte)pAVar5->field8_0x40;
+  uVar14 = (uint)*(byte *)((long)pvVar6 + 2);
+  uVar15 = (uint)*(byte *)((long)pvVar6 + 0xc);
+  uVar16 = (uint)*(byte *)((long)pvVar6 + 0xd);
+  uVar10 = uVar12;
+joined_r0x0000db7c:
+  if (param_4 != (ID *)0x0) {
+    IVar13 = *param_4;
+    IVar8 = NSNumber::numberWithUnsignedChar_((ID)PTR__OBJC_CLASS___NSNumber_0005a270,uVar12);
+    objc_stub::setObject_forKey_(IVar13,IVar8,&cf_SCSIStatus);
+    IVar13 = *param_4;
+    IVar8 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar6 + 2));
+    objc_stub::setObject_forKey_(IVar13,IVar8,&cf_SCSISenseKey);
+    IVar13 = *param_4;
+    IVar8 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar6 + 0xc))
+    ;
+    objc_stub::setObject_forKey_(IVar13,IVar8,&cf_SCSIASC);
+    IVar13 = *param_4;
+    IVar8 = NSNumber::numberWithUnsignedChar_
+                      ((ID)PTR__OBJC_CLASS___NSNumber_0005a270,(ulong)*(byte *)((long)pvVar6 + 0xd))
+    ;
+    objc_stub::setObject_forKey_(IVar13,IVar8,&cf_SCSIASCQ);
+  }
+  _free(puVar7);
+  _free(pAVar5);
+  _free(pvVar6);
+  return (uVar15 & 0xff) << 0x10 | uVar16 << 0x18 | (uVar14 & 0xff) << 8 | (uint)uVar10 & 0xff;
+}
+
+
+
+=== resetDEK: ===
+
+/* Function Stack Size: 0x18 bytes */
+
+int WDDevice::resetDEK_(ID param_1,SEL param_2,ID *param_3)
+
+{
+  char cVar1;
+  bool bVar2;
+  byte bVar3;
+  int iVar4;
+  ID IVar5;
+  time_t tVar6;
+  AnonymousStructure1 *pAVar7;
+  AnonymousStructure12 *pAVar8;
+  uint uVar9;
+  int iVar10;
+  unsigned_int local_54;
+  
+  if (param_3 == (ID *)0x0) {
+    uVar9 = 0xffffffff;
+  }
+  else {
+    IVar5 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar5 = NSProcessInfo::environment(IVar5);
+    IVar5 = NSProcessInfo::objectForKey_(IVar5,&cf_WD_DEBUG);
+    if (IVar5 != 0) {
+      _NSLog(&cf____________________);
+    }
+    IVar5 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar5 = NSProcessInfo::environment(IVar5);
+    IVar5 = NSProcessInfo::objectForKey_(IVar5,&cf_WD_DEBUG);
+    if (IVar5 != 0) {
+      _NSLog(&cf_ResetingtheDEK___);
+    }
+    IVar5 = NSProcessInfo::processInfo((ID)PTR__OBJC_CLASS___NSProcessInfo_0005a268);
+    IVar5 = NSProcessInfo::environment(IVar5);
+    IVar5 = NSProcessInfo::objectForKey_(IVar5,&cf_WD_DEBUG);
+    if (IVar5 != 0) {
+      _NSLog(&cf____________________);
+    }
+    if (*(char *)(param_1 + (long)mHasOptimusController) == '\0') {
+      tVar6 = _time((time_t *)0x0);
+      _srand((uint)tVar6);
+      local_54 = _rand();
+      bVar3 = devicePrimaryLunSelection(param_1);
+      iVar4 = EncryptResetDEK_onLUN_error_(param_1,&local_54,(uint)bVar3,param_3);
+      uVar9 = iVar4 >> 0x18;
+      if (((iVar4 & 0xffff00) == 0x40200) && (uVar9 == 0x1b)) {
+        iVar10 = -2;
+        while( true ) {
+          pAVar7 = _calloc(1,0x20);
+          bVar3 = devicePrimaryLunSelection(param_1);
+          iVar4 = EncryptGetStatus_onLUN_error_(param_1,pAVar7,(uint)bVar3,param_3);
+          cVar1 = pAVar7->field2_0x3;
+          _free(pAVar7);
+          if ((iVar4 == 0) && (cVar1 == '\0')) break;
+          uVar9 = iVar4 >> 0x18;
+          NSThread::sleepForTimeInterval_
+                    ((ID)PTR__OBJC_CLASS___NSThread_0005a1f8,0x4024000000000000);
+          if ((((iVar10 == 0) || ((iVar4 & 0xff00) != 0x200)) || ((iVar4 & 0xff0000) != 0x40000)) ||
+             (iVar10 = iVar10 + 1, uVar9 != 0x1b)) goto LAB_00013fb8;
+        }
+        iVar4 = 0;
+        uVar9 = 0;
+      }
+    }
+    else {
+      iVar4 = EncryptResetDEKPrepareOptimus_(param_1,param_3);
+      if ((iVar4 == 0) && (iVar4 = EncryptResetDEKOptimus_(param_1,param_3), iVar4 == 0)) {
+        iVar10 = -3;
+        do {
+          pAVar8 = _calloc(1,0x10);
+          iVar4 = EncryptGetStatusOptimus_error_(param_1,pAVar8,param_3);
+          if (pAVar8->field1_0x1 == '\x0e') {
+            bVar3 = pAVar8->field6_0x9;
+            _free(pAVar8);
+            if ((bVar3 >> 1 & 1) == 0) break;
+          }
+          else {
+            _free(pAVar8);
+          }
+          NSThread::sleepForTimeInterval_
+                    ((ID)PTR__OBJC_CLASS___NSThread_0005a1f8,0x4024000000000000);
+          bVar2 = iVar10 != -1;
+          iVar10 = iVar10 + 1;
+        } while (bVar2);
+      }
+      uVar9 = iVar4 >> 0x18;
+    }
+LAB_00013fb8:
+    uVar9 = iVar4 & 0xffffff | uVar9 << 0x18;
+  }
+  return uVar9;
+}
+
+
+
+=== -[WDDevice(SCSICommands)_EncryptArmWithPassword:passwordLength:onLUN:error:].cold.1 ===
+
+void __WDDevice_SCSICommands__EncryptArmWithPassword_passwordLength_onLUN_error___cold_1(void)
+
+{
+                    /* WARNING: Subroutine does not return */
+  ___assert_rtn("-[WDDevice(SCSICommands) EncryptArmWithPassword:passwordLength:onLUN:error:]",
+                "WDDevice+SCSICommands.m",0x15e,"passwordLength <= 32");
+}
+
+
+
+=== -[WDDevice(SCSICommands)_EncryptDisArmWithPassword:passwordLength:onLUN:error:].cold.1 ===
+
+void __WDDevice_SCSICommands__EncryptDisArmWithPassword_passwordLength_onLUN_error___cold_1(void)
+
+{
+                    /* WARNING: Subroutine does not return */
+  ___assert_rtn("-[WDDevice(SCSICommands) EncryptDisArmWithPassword:passwordLength:onLUN:error:]",
+                "WDDevice+SCSICommands.m",0x1d6,"passwordLength <= 32");
+}
+
+
+
+=== ConfigSetDriveSleepTimer:error: ===
+
+ID __objc_msgSend_stub objc_stub::ConfigSetDriveSleepTimer_error_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)(self,PTR_s_ConfigSetDriveSleepTimer_error__000583b8)
+  ;
+  return IVar1;
+}
+
+
+
+=== EncryptArmWithPassword:passwordLength:onLUN:error: ===
+
+ID __objc_msgSend_stub objc_stub::EncryptArmWithPassword_passwordLength_onLUN_error_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)
+                    (self,PTR_s_EncryptArmWithPassword_passwordL_000583f8);
+  return IVar1;
+}
+
+
+
+=== EncryptArmWithPasswordOptimus:passwordLength:error: ===
+
+ID __objc_msgSend_stub objc_stub::EncryptArmWithPasswordOptimus_passwordLength_error_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)
+                    (self,PTR_s_EncryptArmWithPasswordOptimus_pa_00058400);
+  return IVar1;
+}
+
+
+
+=== EncryptDisArmWithPassword:passwordLength:onLUN:error: ===
+
+ID __objc_msgSend_stub objc_stub::EncryptDisArmWithPassword_passwordLength_onLUN_error_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)
+                    (self,PTR_s_EncryptDisArmWithPassword_passwo_00058410);
+  return IVar1;
+}
+
+
+
+=== EncryptDisArmWithPasswordOptimus:passwordLength:error: ===
+
+ID __objc_msgSend_stub
+objc_stub::EncryptDisArmWithPasswordOptimus_passwordLength_error_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)
+                    (self,PTR_s_EncryptDisArmWithPasswordOptimus_00058418);
+  return IVar1;
+}
+
+
+
+=== EncryptResetDEK:onLUN:error: ===
+
+ID __objc_msgSend_stub objc_stub::EncryptResetDEK_onLUN_error_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)(self,PTR_s_EncryptResetDEK_onLUN_error__00058430);
+  return IVar1;
+}
+
+
+
+=== EncryptResetDEKOptimus: ===
+
+ID __objc_msgSend_stub objc_stub::EncryptResetDEKOptimus_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)(self,PTR_s_EncryptResetDEKOptimus__00058438);
+  return IVar1;
+}
+
+
+
+=== EncryptResetDEKPrepareOptimus: ===
+
+ID __objc_msgSend_stub objc_stub::EncryptResetDEKPrepareOptimus_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)(self,PTR_s_EncryptResetDEKPrepareOptimus__00058440);
+  return IVar1;
+}
+
+
+
+=== EncryptUnlockWithPassword:passwordLength:onLUN:error: ===
+
+ID __objc_msgSend_stub objc_stub::EncryptUnlockWithPassword_passwordLength_onLUN_error_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)
+                    (self,PTR_s_EncryptUnlockWithPassword_passwo_00058448);
+  return IVar1;
+}
+
+
+
+=== EncryptUnlockWithPasswordOptimus:passwordLength:error: ===
+
+ID __objc_msgSend_stub
+objc_stub::EncryptUnlockWithPasswordOptimus_passwordLength_error_(ID self,...)
+
+{
+  ID IVar1;
+  
+  IVar1 = (*(code *)PTR__objc_msgSend_0004c0d0)
+                    (self,PTR_s_EncryptUnlockWithPasswordOptimus_00058450);
+  return IVar1;
+}
+
+
+

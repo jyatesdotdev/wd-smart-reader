@@ -77,6 +77,8 @@ int WDCookPassword(SCSITaskDeviceInterface **dev, const char *password, UInt8 *c
 #pragma mark - Encryption Commands
 
 int WDScsiEncryptLegacy(SCSITaskDeviceInterface **dev, UInt8 subCmd, UInt8 flag, UInt8 *cooked, int pwOffset) {
+    // Unlock uses 0x28-byte page; arm/disarm use 0x48
+    UInt8 pageSize = (subCmd == 0xE1) ? 0x28 : 0x48;
     UInt8 page[0x48] = {0};
     page[0] = 0x45;
     page[3] = flag;
@@ -86,8 +88,8 @@ int WDScsiEncryptLegacy(SCSITaskDeviceInterface **dev, UInt8 subCmd, UInt8 flag,
     SCSICommandDescriptorBlock cdb = {0};
     cdb[0] = 0xC1;
     cdb[1] = subCmd;
-    cdb[8] = 0x48;
-    return WDExecSCSITask(dev, cdb, kSCSICDBSize_10Byte, page, 0x48,
+    cdb[8] = pageSize;
+    return WDExecSCSITask(dev, cdb, kSCSICDBSize_10Byte, page, pageSize,
                         kSCSIDataTransfer_FromInitiatorToTarget, 60000);
 }
 
@@ -124,7 +126,7 @@ void WDCmdUnlock(SCSITaskDeviceInterface **dev, int argc, const char *argv[], in
     UInt8 cooked[32] = {0};
     if (WDCookPassword(dev, password, cooked) != 0) return;
 
-    if (WDScsiEncryptLegacy(dev, 0xE1, 0x01, cooked, 0x08) == 0)
+    if (WDScsiEncryptLegacy(dev, 0xE1, 0x00, cooked, 0x08) == 0)
         printf("Drive unlocked.\n");
     else
         fprintf(stderr, "Error: Unlock failed (wrong password?)\n");
