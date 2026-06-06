@@ -506,6 +506,34 @@ void WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
 }
 
 
+#pragma mark - LED Control
+
+void WDCmdLED(SCSITaskDeviceInterface **dev, const char *setValue) {
+    UInt8 buf[16] = {0};
+    if (WDScsiModeSense(dev, 0x21, buf, sizeof(buf)) != 0) {
+        fprintf(stderr, "Error: LED not supported on this drive\n");
+        return;
+    }
+
+    if (!setValue) {
+        printf("LED: %s\n", buf[12] ? "on" : "off");
+    } else {
+        BOOL on;
+        if (strcmp(setValue, "on") == 0) on = YES;
+        else if (strcmp(setValue, "off") == 0) on = NO;
+        else { fprintf(stderr, "Usage: wd_smart led [on|off]\n"); return; }
+
+        memset(buf, 0, 4);
+        buf[4] &= 0x7F;
+        buf[12] = on ? 0xFF : 0x00;
+
+        if (WDScsiModeSelect(dev, buf, 16, YES) == 0)
+            printf("LED turned %s.\n", on ? "on" : "off");
+        else
+            fprintf(stderr, "Error: Could not set LED\n");
+    }
+}
+
 #pragma mark - Power and Erase
 
 void WDCmdPowerOff(SCSITaskDeviceInterface **dev) {

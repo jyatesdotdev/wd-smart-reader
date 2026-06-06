@@ -177,6 +177,7 @@ void WDCmdStatus(SCSITaskDeviceInterface **dev);
 void WDCmdTemp(SCSITaskDeviceInterface **dev);
 void WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue);
 void WDCmdPowerOff(SCSITaskDeviceInterface **dev);
+void WDCmdLED(SCSITaskDeviceInterface **dev, const char *setValue);
 void WDCmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]);
 void WDCmdSecureErase(int argc, const char *argv[]);
 

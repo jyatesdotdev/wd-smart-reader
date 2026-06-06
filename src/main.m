@@ -20,6 +20,7 @@ void WDUsage(void) {
         "  status         Show self-test results log\n"
         "  temp           Show drive temperature and fan status\n"
         "  sleep [MIN]    Get or set sleep timer (0 = disable)\n"
+        "  led [on|off]   Get or set drive LED\n"
         "  power-off      Safely spin down and power off drive\n"
         "  erase          Quick format via WD bridge (requires --confirm)\n"
         "  secure-erase   Zero-fill every sector (requires --confirm)\n"
@@ -81,6 +82,7 @@ int main(int argc, const char *argv[]) {
         else if (strcmp(cmd, "status") == 0)     WDCmdStatus(dev);
         else if (strcmp(cmd, "temp") == 0)       WDCmdTemp(dev);
         else if (strcmp(cmd, "sleep") == 0)      WDCmdSleep(dev, argc > argOffset+1 ? argv[argOffset+1] : NULL);
+        else if (strcmp(cmd, "led") == 0)        WDCmdLED(dev, argc > argOffset+1 ? argv[argOffset+1] : NULL);
         else if (strcmp(cmd, "power-off") == 0)  WDCmdPowerOff(dev);
         else if (strcmp(cmd, "erase") == 0)     WDCmdErase(dev, argc, argv);
         else if (strcmp(cmd, "set-password") == 0)    WDCmdSetPassword(dev, argc, argv, argOffset);
