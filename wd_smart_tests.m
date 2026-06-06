@@ -89,13 +89,12 @@ static void mockReset(void) {
     entry[6] = 0x00; entry[7] = 0x64; // hours=100
 
     // Mode page 0x1A (power condition) with sleep timer = 10 min (6000 * 100ms)
-    g_mock.modePage[4] = 0x1A; // page code
-    g_mock.modePage[5] = 0x0A; // page length = 10
-    UInt32 timer = 6000; // 10 minutes in 100ms units
-    g_mock.modePage[10] = (timer >> 24) & 0xFF;
-    g_mock.modePage[11] = (timer >> 16) & 0xFF;
-    g_mock.modePage[12] = (timer >> 8) & 0xFF;
-    g_mock.modePage[13] = timer & 0xFF;
+    g_mock.modePage[4] = 0x9A; // page code
+    g_mock.modePage[5] = 0x26; // page length = 10
+    // Timer at bytes 14-15 (2-byte BE, in 100ms units). 10 min = 6000
+    g_mock.modePage[7] = 0x01; // Standby_z enable
+    g_mock.modePage[14] = (6000 >> 8) & 0xFF;
+    g_mock.modePage[15] = 6000 & 0xFF;
 
     // VPD 0x80: Serial number "ABC12345"
     g_mock.vpdPages[0x80][0] = 0x00; g_mock.vpdPages[0x80][1] = 0x80;
@@ -608,7 +607,7 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testCmdSleepDisabled {
     // Set timer to 0
-    memset(&g_mock.modePage[10], 0, 4);
+    g_mock.modePage[7] = 0; g_mock.modePage[14] = 0; g_mock.modePage[15] = 0;
 
     char outBuf[4096] = {0};
     fflush(stdout);
@@ -632,9 +631,8 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 
     XCTAssert(strstr(outBuf, "20 minutes") != NULL);
     // Verify mode page was written with correct timer value (20*600=12000=0x2EE0)
-    UInt32 written = ((UInt32)g_mock.modePage[10]<<24) | ((UInt32)g_mock.modePage[11]<<16)
-                   | ((UInt32)g_mock.modePage[12]<<8) | g_mock.modePage[13];
-    XCTAssertEqual(written, 12000u);
+    UInt16 written = ((UInt16)g_mock.modePage[14]<<8) | g_mock.modePage[15];
+    XCTAssertEqual(written, (UInt16)(20 * 600));
 }
 
 - (void)testCmdSleepDisablesWithZero {
@@ -646,9 +644,8 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     fflush(stdout); fclose(stdout); stdout = old;
 
     XCTAssert(strstr(outBuf, "disabled") != NULL);
-    UInt32 written = ((UInt32)g_mock.modePage[10]<<24) | ((UInt32)g_mock.modePage[11]<<16)
-                   | ((UInt32)g_mock.modePage[12]<<8) | g_mock.modePage[13];
-    XCTAssertEqual(written, 0u);
+    UInt16 written = ((UInt16)g_mock.modePage[14]<<8) | g_mock.modePage[15];
+    XCTAssertEqual(written, (UInt16)0);
 }
 
 // MARK: - Self-Test Commands

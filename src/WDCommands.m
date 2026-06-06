@@ -456,41 +456,42 @@ void WDCmdTemp(SCSITaskDeviceInterface **dev) {
 /// Get or set the drive sleep (spindown) timer.
 /// When setValue is NULL, displays current setting. Otherwise sets it.
 void WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
-    // Power Condition mode page (0x1A)
-    UInt8 buf[40] = {0};
+    // Power Condition mode page (0x1A) with DBD.
+    // Response layout: [0..3]=header, [4]=pageCode|PS, [5]=pageLen, [6..]=page data
+    // WD standby timer is a 2-byte BE value at absolute offset 14-15 (page data byte 8-9)
+    UInt8 buf[44] = {0};
     if (WDScsiModeSense(dev, 0x1A, buf, sizeof(buf)) != 0) {
         fprintf(stderr, "Error: Could not read sleep timer\n");
         return;
     }
 
     if (!setValue) {
-        // Standby timer is a 4-byte value in 100ms units, at page offset 6-9
-        // (after 4-byte mode header + 2-byte page header)
-        UInt8 pageLen = buf[5];
-        UInt32 timer = 0;
-        if (pageLen >= 10) {
-            timer = ((UInt32)buf[10] << 24) | ((UInt32)buf[11] << 16)
-                  | ((UInt32)buf[12] << 8)  | buf[13];
-        }
+        UInt16 timer = ((UInt16)buf[14] << 8) | buf[15];
         if (timer == 0)
             printf("Sleep timer: disabled (never)\n");
         else
             printf("Sleep timer: ~%u minutes (%u seconds)\n", timer / 600, timer / 10);
     } else {
         int minutes = atoi(setValue);
-        UInt32 timerVal = (minutes <= 0) ? 0 : (UInt32)minutes * 600;
+        UInt16 timerVal = (minutes <= 0) ? 0 : (UInt16)(minutes * 600);
 
-        // Clear mode parameter header (required for MODE SELECT)
+        // Clear mode parameter header and PS bit
         memset(buf, 0, 4);
-        buf[4] &= 0x3F;  // clear PS (parameters saveable) bit
+        buf[4] &= 0x3F;
 
-        // Write new standby timer value
-        buf[10] = (timerVal >> 24) & 0xFF;
-        buf[11] = (timerVal >> 16) & 0xFF;
-        buf[12] = (timerVal >> 8)  & 0xFF;
-        buf[13] = timerVal & 0xFF;
+        // buf[7] bit 0 = Standby_z enable
+        if (timerVal > 0)
+            buf[7] |= 0x01;
+        else
+            buf[7] &= ~0x01;
 
-        if (WDScsiModeSelect(dev, buf, 18, YES) == 0) {
+        // Write standby timer
+        buf[14] = (timerVal >> 8) & 0xFF;
+        buf[15] = timerVal & 0xFF;
+
+        // Parameter list length = page length + 6 (4 header + 2 page header)
+        UInt8 paramLen = buf[5] + 6;
+        if (WDScsiModeSelect(dev, buf, paramLen, YES) == 0) {
             if (minutes <= 0)
                 printf("Sleep timer disabled.\n");
             else
