@@ -59,6 +59,7 @@ sudo ./wd_smart [command]
 | `status` | Show self-test results log |
 | `temp` | Show drive temperature |
 | `sleep [MIN]` | Get or set sleep timer (0 = disable) |
+| `led [on\|off]` | Get or set drive LED |
 | `power-off` | Safely spin down and power off drive |
 | `set-password` | Enable drive encryption (locks on power cycle) |
 | `unlock` | Unlock a locked drive |

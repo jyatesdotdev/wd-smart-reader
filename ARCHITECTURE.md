@@ -18,6 +18,9 @@
 │            Hardware Adapters                              │
 │  execSCSITaskReal     driveIdentityFromIOKit             │
 │  openWDDevice         findWDDiskBSDName                  │
+├──────────────────────────────────────────────────────────┤
+│            System Frameworks                             │
+│  IOKit (SCSI)   DiskArbitration (unmount)   NSTask       │
 └──────────────────────────────────────────────────────────┘
          │                           │
          ▼                           ▼
@@ -113,6 +116,6 @@ These are thin adapters with no business logic. They require real hardware or a 
 
 ## Dependencies
 
-- **Build**: Xcode Command Line Tools (clang, Foundation, IOKit, CoreFoundation)
+- **Build**: Xcode Command Line Tools (clang, Foundation, IOKit, CoreFoundation, DiskArbitration)
 - **Test**: XCTest framework (included with Xcode)
 - **Runtime**: None (statically linked against system frameworks)
