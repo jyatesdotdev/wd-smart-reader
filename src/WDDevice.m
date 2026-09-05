@@ -68,6 +68,25 @@ static uint64_t parentEntryID(io_service_t s) {
     return id;
 }
 
+/// If another process already holds a SCSITaskUserClient on this nub, return
+/// its "IOUserClientCreator" string (e.g. "pid 1112, WDDriveUtilityHe").
+static NSString *existingUserClientHolder(io_service_t nub) {
+    io_iterator_t it;
+    if (IORegistryEntryGetChildIterator(nub, kIOServicePlane, &it) != KERN_SUCCESS) return nil;
+    NSString *holder = nil;
+    io_service_t child;
+    while (!holder && (child = IOIteratorNext(it)) != IO_OBJECT_NULL) {
+        if (IOObjectConformsTo(child, "SCSITaskUserClient")) {
+            CFTypeRef ref = IORegistryEntryCreateCFProperty(child, CFSTR("IOUserClientCreator"), kCFAllocatorDefault, 0);
+            if (ref && CFGetTypeID(ref) == CFStringGetTypeID()) holder = (__bridge_transfer NSString *)ref;
+            else if (ref) CFRelease(ref);
+        }
+        IOObjectRelease(child);
+    }
+    IOObjectRelease(it);
+    return holder;
+}
+
 typedef enum { kLUNOther, kLUNDisk, kLUNSES } LUNKind;
 
 /// Classify a nub: WD disk LUN, WD SES LUN, or something we don't care about.
@@ -145,6 +164,7 @@ SCSITaskDeviceInterface **WDOpenDevice(char *nameOut, size_t nameSize, int devic
         }
 
         uint64_t enclosureID = parentEntryID(service);
+        NSString *holder = existingUserClientHolder(service);
 
         // Create the IOKit plugin interface for SCSI task submission
         IOCFPlugInInterface **plugin = NULL;
@@ -155,8 +175,15 @@ SCSITaskDeviceInterface **WDOpenDevice(char *nameOut, size_t nameSize, int devic
         IOObjectRelease(service);
 
         if (kr != kIOReturnSuccess || !plugin) {
-            fprintf(stderr, "Error: Cannot create SCSITask plugin (0x%x)\n", kr);
-            continue;
+            fprintf(stderr, "Error: Cannot open SES device (IOKit 0x%08x).\n", kr);
+            if (holder)
+                fprintf(stderr, "  Another process already holds it: %s\n"
+                                "  Quit that app, or: killall WDDriveUtilityHelper WDSecurityHelper\n",
+                        [holder UTF8String]);
+            else
+                fprintf(stderr, "  Retry with sudo, or quit WD Discovery / WD Drive Utilities / WD Security.\n");
+            IOObjectRelease(iter);
+            return NULL;
         }
 
         // Query for the SCSI task device interface
@@ -171,9 +198,9 @@ SCSITaskDeviceInterface **WDOpenDevice(char *nameOut, size_t nameSize, int devic
         kr = (*dev)->ObtainExclusiveAccess(dev);
         if (kr != kIOReturnSuccess) {
             fprintf(stderr,
-                "Error: Cannot get exclusive access (0x%x).\n"
+                "Error: Cannot get exclusive access (IOKit 0x%08x).\n"
                 "  - Quit WD Discovery / WD Drive Utilities / WD Security if running\n"
-                "    (check Activity Monitor for WDDriveUtilityHelper, WDSecurityHelper)\n"
+                "    (or: killall WDDriveUtilityHelper WDSecurityHelper)\n"
                 "  - Retry with sudo\n", kr);
             (*dev)->Release(dev);
             IOObjectRelease(iter);

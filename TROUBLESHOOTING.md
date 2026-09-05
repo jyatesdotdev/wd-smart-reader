@@ -16,7 +16,9 @@ The key ones:
 | `05/20/00` | Opcode not supported by this bridge | Feature genuinely unavailable on this model |
 | `05/24/00` | Invalid field in CDB | Page not supported (e.g. VPD 0xB1 on Passport) |
 | `05/74/40` | WD: invalid data in page | Wrong password, or wrong page layout |
-| `04/44/81` | Bridge can't reach the SATA drive | See next section |
+| `04/44/81` | Bridge can't reach the SATA drive | **Try another port/cable first** — see next section |
+| `02/04/01` | LUN becoming ready | Drive spinning up; retry in a few seconds |
+| status `0x05`, no sense | Bogus MODE SELECT status | Write probably committed; the tool verifies by read-back |
 
 ## Everything fails with `sense 04/44/81 (Hardware Error)` — but `info` shows serial/capacity
 
@@ -29,11 +31,25 @@ child and `IOServiceBusyTimeoutExtensions > 0` — the kernel timed out probing 
 The drive inside the enclosure is not responding: not spinning, SATA link
 down, or the bridge is wedged.
 
-1. Unplug the drive, wait 10 seconds, plug it **directly** into the Mac (no hub, no dock)
-2. Bus-powered Passports need a full-power port; try another port or the supplied cable
-3. Quit WD Discovery / WD Security / WD Drive Utilities (`killall WDDriveUtilityHelper WDSecurityHelper`)
-4. Close browser tabs that have WebUSB permission (`ioreg -r -n "My Passport 0748" | grep IOUserClientCreator` shows who holds the device)
-5. If it persists across ports and cables, the HDD or bridge has failed
+1. **Try a different port and cable first.** This has been observed to fully resolve `04/44/81`: the same drive failed on one port and worked perfectly on another (SMART PASSED, 36 °C). Don't conclude the drive is dead until you've tried at least two ports.
+2. Unplug the drive, wait 10 seconds, plug it **directly** into the Mac (no hub, no dock)
+3. Bus-powered Passports need a full-power port
+4. Quit WD Discovery / WD Drive Utilities / WD Security (`killall WDDriveUtilityHelper WDSecurityHelper`)
+5. Close browser tabs that have WebUSB permission (`ioreg -r -c SCSITaskUserClient -l | grep IOUserClientCreator` shows who holds the device)
+6. If it persists across several ports and cables, the HDD or bridge has failed
+
+### SMART works but there is no `/dev/diskN`
+
+If the kernel's LUN 0 probe timed out during a slow spin-up (~45 s, `IOServiceBusyTimeoutExtensions = 2`)
+it detaches and **never retries**. SMART then reads fine through the SES tunnel while the block device
+never appears, so `erase` and `secure-erase` can't run. Replug the drive (on a known-good port) to force
+a fresh enumeration.
+
+Check with:
+```bash
+ioreg -r -n "My Passport 0748" -w0 | grep -E 'Nub@0|Type00|IOMedia'
+diskutil list external
+```
 
 ## "No WD device found or could not access it"
 
@@ -94,8 +110,8 @@ The LOG SENSE command for page 0x10 may not be supported on all WD bridge firmwa
 
 ## Sleep timer won't set
 
-- **Passport 0748**: MODE SELECT is rejected by the bridge entirely (`05/20/00`); read works, write doesn't.
-- **MyBook 25ED**: write works but `sleep 0` (disable) is rejected — the bridge enforces a minimum. Try `sleep 10`.
+- **Writes do work on Passport 0748** — but the bridge returns a bogus status for MODE SELECT (`0x05`, `sense 02/04/01`, or `sense 04/00/00`) even though the change commits. The tool therefore verifies every write by reading the page back, so a successful change reports success. If you see "not applied", the read-back genuinely disagreed.
+- **MyBook 25ED**: `sleep 0` (disable) is rejected — the bridge enforces a minimum. Try `sleep 10`.
 - Some enclosures restrict values to presets (10, 15, 30, 45, 90 minutes).
 
 ## Temperature reads 0 or nonsensical value

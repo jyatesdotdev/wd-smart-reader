@@ -28,6 +28,23 @@ static const char *senseKeyName(UInt8 key) {
     }
 }
 
+static const char *taskStatusName(UInt8 st) {
+    switch (st) {
+        case 0x00: return "GOOD";
+        case 0x02: return "CHECK CONDITION";
+        case 0x04: return "CONDITION MET";
+        case 0x08: return "BUSY";
+        case 0x10: return "INTERMEDIATE";
+        case 0x14: return "INTERMEDIATE CONDITION MET";
+        case 0x18: return "RESERVATION CONFLICT";
+        case 0x22: return "COMMAND TERMINATED";
+        case 0x28: return "QUEUE FULL";
+        case 0x30: return "ACA ACTIVE";
+        case 0x40: return "TASK ABORTED";
+        default:   return "unknown";
+    }
+}
+
 /// Decode common ASC/ASCQ pairs, including WD-bridge-specific meanings
 /// learned from hardware testing (see AGENTS.md).
 static const char *ascName(UInt8 asc, UInt8 ascq) {
@@ -60,12 +77,15 @@ const char *WDScsiLastErrorString(void) {
         snprintf(buf, sizeof(buf), "IOKit error 0x%08x", s->ioReturn);
     } else if (s->taskStatus != kSCSITaskStatus_GOOD) {
         const char *desc = ascName(s->asc, s->ascq);
-        if (desc)
+        const char *st = taskStatusName(s->taskStatus);
+        if (s->senseKey == 0 && s->asc == 0 && s->ascq == 0)
+            snprintf(buf, sizeof(buf), "SCSI status %02X (%s), no sense data", s->taskStatus, st);
+        else if (desc)
             snprintf(buf, sizeof(buf), "sense %02X/%02X/%02X (%s: %s)",
                      s->senseKey, s->asc, s->ascq, senseKeyName(s->senseKey), desc);
         else
-            snprintf(buf, sizeof(buf), "sense %02X/%02X/%02X (%s)",
-                     s->senseKey, s->asc, s->ascq, senseKeyName(s->senseKey));
+            snprintf(buf, sizeof(buf), "sense %02X/%02X/%02X (%s, status %02X)",
+                     s->senseKey, s->asc, s->ascq, senseKeyName(s->senseKey), s->taskStatus);
     } else {
         snprintf(buf, sizeof(buf), "OK (%llu bytes)", s->transferred);
     }

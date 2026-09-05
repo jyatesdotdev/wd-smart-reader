@@ -554,14 +554,31 @@ int WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
     if (paramLen > sizeof(buf)) paramLen = sizeof(buf);
     if (paramLen < 16) paramLen = 16;   // must include the timer bytes
 
-    if (WDScsiModeSelect(dev, buf, paramLen, YES) == 0) {
-        if (minutes == 0)
-            printf("Sleep timer disabled.\n");
-        else
-            printf("Sleep timer set to %ld minutes.\n", minutes);
+    int rc = WDScsiModeSelect(dev, buf, paramLen, YES);
+
+    // The WD bridge frequently returns a bogus status for MODE SELECT even
+    // though the write committed (observed on Passport 0748: status 0x05,
+    // sense 02/04/01 and 04/00/00 on writes that all took effect).
+    // Trust the read-back, not the status.
+    UInt8 verify[44] = {0};
+    if (WDScsiModeSense(dev, 0x1A, verify, sizeof(verify)) == 0) {
+        UInt32 got = ((UInt32)verify[12] << 24) | ((UInt32)verify[13] << 16)
+                   | ((UInt32)verify[14] << 8) | verify[15];
+        if (got == timerVal) {
+            if (minutes == 0) printf("Sleep timer disabled.\n");
+            else              printf("Sleep timer set to %ld minutes.\n", minutes);
+            if (rc != 0 && g_verbose)
+                fprintf(stderr, "[note] bridge reported failure but write committed\n");
+            return kWDExitOK;
+        }
+        fprintf(stderr, "Error: Sleep timer not applied (drive still reports %u seconds)\n", got / 10);
+    } else if (rc == 0) {
+        // Write claimed success but we cannot verify; report success.
+        printf("Sleep timer set to %ld minutes (unverified).\n", minutes);
         return kWDExitOK;
     }
-    WDScsiPrintError("Could not set sleep timer");
+
+    if (rc != 0) WDScsiPrintError("Could not set sleep timer");
     if (minutes == 0)
         fprintf(stderr, "  (Some bridges enforce a minimum and reject 0. Try 'sleep 10'.)\n");
     return kWDExitFailure;
@@ -595,11 +612,25 @@ int WDCmdLED(SCSITaskDeviceInterface **dev, const char *setValue) {
     buf[4] &= 0x7F;
     buf[12] = on ? 0xFF : 0x00;
 
-    if (WDScsiModeSelect(dev, buf, 16, YES) == 0) {
-        printf("LED turned %s.\n", on ? "on" : "off");
+    int rc = WDScsiModeSelect(dev, buf, 16, YES);
+
+    // Same bridge quirk as the sleep timer: MODE SELECT often returns a bogus
+    // status while the write actually commits. Verify by reading the page back.
+    UInt8 verify[16] = {0};
+    if (WDScsiModeSense(dev, 0x21, verify, sizeof(verify)) == 0 && (verify[4] & 0x3F) == 0x21) {
+        if (!!verify[12] == !!on) {
+            printf("LED turned %s.\n", on ? "on" : "off");
+            if (rc != 0 && g_verbose)
+                fprintf(stderr, "[note] bridge reported failure but write committed\n");
+            return kWDExitOK;
+        }
+        fprintf(stderr, "Error: LED not applied (drive still reports %s)\n", verify[12] ? "on" : "off");
+    } else if (rc == 0) {
+        printf("LED turned %s (unverified).\n", on ? "on" : "off");
         return kWDExitOK;
     }
-    WDScsiPrintError("Could not set LED");
+
+    if (rc != 0) WDScsiPrintError("Could not set LED");
     return kWDExitFailure;
 }
 
@@ -703,10 +734,13 @@ int WDCmdProbe(SCSITaskDeviceInterface **dev) {
     if (driveOK == 0) {
         printf("\nDIAGNOSIS: Only INQUIRY-class commands work. The bridge answers from its own\n"
                "firmware but cannot reach the SATA drive%s.\n"
-               "  - Unplug the enclosure, wait 10 s, plug it directly into the Mac (no hub)\n"
-               "  - If it has a power adapter, check it; bus-powered drives need a full-power port\n"
-               "  - Quit WD Discovery / WD Security and close browser tabs with WebUSB access\n"
-               "  - If it persists across ports/cables, the drive or bridge has likely failed\n",
+               "  1. TRY A DIFFERENT PORT AND CABLE FIRST — this has been seen to fix it outright\n"
+               "  2. Plug directly into the Mac (no hub/dock); bus-powered drives need a full-power port\n"
+               "  3. Unplug, wait 10 s, replug\n"
+               "  4. Quit WD Discovery / WD Security / WD Drive Utilities\n"
+               "     (killall WDDriveUtilityHelper WDSecurityHelper)\n"
+               "  5. Close browser tabs holding WebUSB access to the drive\n"
+               "  6. If it persists across several ports and cables, the drive or bridge has failed\n",
                sawBridgeFault ? " (sense 04/44/xx = internal target failure)" : "");
         return kWDExitFailure;
     }

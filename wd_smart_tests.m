@@ -38,6 +38,11 @@ typedef struct {
     // Fault injection: when set, every command fails with this sense
     BOOL   failAll;
     UInt8  failKey, failASC, failASCQ;
+    // Bridge quirk: MODE SELECT commits the write but returns a bogus status
+    BOOL   modeSelectLies;
+    UInt8  modeSelectStatus;
+    // Bridge genuinely ignores the write (page unchanged)
+    BOOL   modeSelectIgnored;
     NSString *bsdName;          // what g_diskBSDName returns (nil = no disk)
 } MockDrive;
 
@@ -255,12 +260,22 @@ static int mockExecSCSI(void *ctx,
         }
         case 0x15: { // MODE SELECT
             UInt8 *p = (UInt8 *)buffer;
-            if (buffer && (p[4] & 0x3F) == 0x21) {
-                memcpy(g_mock.ledPage, buffer, bufferSize < 16 ? bufferSize : 16);
-                g_mock.ledPage[4] = 0x21;
-                return 0;
+            if (!g_mock.modeSelectIgnored) {
+                if (buffer && (p[4] & 0x3F) == 0x21) {
+                    memcpy(g_mock.ledPage, buffer, bufferSize < 16 ? bufferSize : 16);
+                    g_mock.ledPage[4] = 0x21;
+                } else if (buffer) {
+                    memcpy(g_mock.modePage, buffer, bufferSize < 40 ? bufferSize : 40);
+                }
             }
-            if (buffer) memcpy(g_mock.modePage, buffer, bufferSize < 40 ? bufferSize : 40);
+            // Write committed either way; optionally report a bogus failure
+            if (g_mock.modeSelectLies) {
+                g_lastSense.taskStatus = g_mock.modeSelectStatus;
+                if (g_mock.modeSelectStatus == 0x02) {
+                    g_lastSense.senseKey = 0x02; g_lastSense.asc = 0x04; g_lastSense.ascq = 0x01;
+                }
+                return kWDScsiErrCheck;
+            }
             return 0;
         }
         case 0xC4: // FORMAT DISK (erase)
@@ -1037,6 +1052,56 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     // instead verify the successful path prints and a failed vendor cmd is reported via stderr
     NSString *out = captureOutput(YES, ^{ WDCmdInfo(NULL); });
     XCTAssert([out containsString:@"Encrypt:"], @"%@", out);
+}
+
+// MARK: - Bridge lies about MODE SELECT status (Passport 0748 quirk)
+
+- (void)testSleepWriteSucceedsWhenBridgeReportsBogusFailure {
+    // Real hardware: MODE SELECT commits the timer but returns sense 02/04/01.
+    g_mock.modeSelectLies = YES; g_mock.modeSelectStatus = 0x02;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdSleep(NULL, "45"), kWDExitOK); });
+    XCTAssert([out containsString:@"45 minutes"], @"%@", out);
+    XCTAssertFalse([out containsString:@"Error:"], @"must not report failure: %@", out);
+    UInt32 written = ((UInt32)g_mock.modePage[12]<<24)|((UInt32)g_mock.modePage[13]<<16)
+                   |((UInt32)g_mock.modePage[14]<<8)|g_mock.modePage[15];
+    XCTAssertEqual(written, (UInt32)(45 * 600));
+}
+
+- (void)testSleepWriteSucceedsWithGarbageStatus05 {
+    g_mock.modeSelectLies = YES; g_mock.modeSelectStatus = 0x05;
+    XCTAssertEqual(WDCmdSleep(NULL, "25"), kWDExitOK);
+    UInt32 written = ((UInt32)g_mock.modePage[12]<<24)|((UInt32)g_mock.modePage[13]<<16)
+                   |((UInt32)g_mock.modePage[14]<<8)|g_mock.modePage[15];
+    XCTAssertEqual(written, (UInt32)(25 * 600));
+}
+
+- (void)testLEDWriteSucceedsWhenBridgeReportsBogusFailure {
+    g_mock.modeSelectLies = YES; g_mock.modeSelectStatus = 0x02;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdLED(NULL, "off"), kWDExitOK); });
+    XCTAssert([out containsString:@"LED turned off"], @"%@", out);
+    XCTAssertEqual(g_mock.ledPage[12], 0x00);
+}
+
+- (void)testSleepReportsFailureWhenReadbackDisagrees {
+    // Bridge genuinely drops the write: read-back still shows the old value
+    g_mock.modeSelectIgnored = YES;
+    g_mock.modeSelectLies = YES; g_mock.modeSelectStatus = 0x02;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdSleep(NULL, "55"), kWDExitFailure); });
+    XCTAssert([out containsString:@"not applied"], @"%@", out);
+}
+
+- (void)testLEDReportsFailureWhenReadbackDisagrees {
+    g_mock.modeSelectIgnored = YES;
+    g_mock.modeSelectLies = YES; g_mock.modeSelectStatus = 0x02;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdLED(NULL, "off"), kWDExitFailure); });
+    XCTAssert([out containsString:@"not applied"], @"%@", out);
+}
+
+- (void)testSleepReportsFailureWhenWriteFailsAndNoReadback {
+    // Genuine failure: everything fails, so read-back fails too
+    g_mock.failAll = YES; g_mock.failKey = 0x05; g_mock.failASC = 0x20; g_mock.failASCQ = 0x00;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdSleep(NULL, "45"), kWDExitFailure); });
+    XCTAssert([out containsString:@"05/20/00"], @"%@", out);
 }
 
 - (void)testSleepRejectsGarbage {
