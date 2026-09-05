@@ -215,6 +215,10 @@ extern int g_verbose;
 /// the SAME enclosure selected with --disk. 0 = not bound (first match).
 extern uint64_t g_selectedEnclosureID;
 
+/// SCSI LUN number of the opened SES device (typically 1). Written into
+/// vendor encryption CDBs (byte 6), matching WD Drive Utilities' onLUN:.
+extern UInt8 g_selectedLUN;
+
 // =============================================================================
 #pragma mark - SCSI Functions
 // =============================================================================

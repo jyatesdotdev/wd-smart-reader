@@ -10,11 +10,17 @@
 
 #pragma mark - Password Cooking
 
-/// Derive the 32-byte "cooked" password the bridge expects:
-///   SHA-256( salt_utf16le || password_utf16le )
-/// where salt and iteration count live in Handy Store block 1. If that block
-/// is uninitialized, it is initialized (this is what WD Drive Utilities does
-/// on first use).
+/// Derive the 32-byte "cooked" password the bridge expects.
+///
+/// Handy Store block 1 holds a UTF-16LE salt (usually "WDC.") and an iteration
+/// count (usually 1000). The algorithm matches cookpw.py / wdpassport-utils and
+/// WD's Windows/macOS tools:
+///   1. Decode salt to characters, concatenate the password string
+///   2. Encode as UTF-16LE (no BOM)
+///   3. SHA-256, repeated `iterations` times (each round hashes the previous digest)
+///
+/// A single SHA-256 (the old implementation) is what the drive rejects as
+/// 05/74/40 "wrong password".
 int WDCookPassword(SCSITaskDeviceInterface **dev, const char *password, UInt8 *cookedOut) {
     if (!password || !cookedOut) return -1;
 
@@ -22,11 +28,6 @@ int WDCookPassword(SCSITaskDeviceInterface **dev, const char *password, UInt8 *c
     NSString *passwordStr = [NSString stringWithUTF8String:password];
     if (!passwordStr) {
         fprintf(stderr, "Error: Password is not valid UTF-8\n");
-        return -1;
-    }
-    NSData *passwordUTF16 = [passwordStr dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
-    if (!passwordUTF16) {
-        fprintf(stderr, "Error: Could not encode password\n");
         return -1;
     }
 
@@ -74,17 +75,29 @@ int WDCookPassword(SCSITaskDeviceInterface **dev, const char *password, UInt8 *c
         }
     }
 
-    // Extract salt (UTF-16LE at offset 0x0C, NUL-terminated, max 16 bytes)
-    int saltLen = 0;
+    // Decode salt UTF-16LE to characters (same as wdpassport-utils mk_password_block)
+    NSMutableString *saltStr = [NSMutableString string];
     for (int i = 0x0C; i < 0x1C; i += 2) {
-        if (hsBlock[i] == 0 && hsBlock[i+1] == 0) break;
-        saltLen += 2;
+        unichar ch = (unichar)(hsBlock[i] | (hsBlock[i+1] << 8));
+        if (ch == 0) break;
+        [saltStr appendFormat:@"%C", ch];
+    }
+    NSString *combined = [saltStr stringByAppendingString:passwordStr];
+    NSData *utf16 = [combined dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
+    if (!utf16 || utf16.length == 0) {
+        fprintf(stderr, "Error: Could not encode salted password\n");
+        return -1;
     }
 
-    // Build combined UTF-16LE: salt + password, then SHA-256
-    NSMutableData *combined = [NSMutableData dataWithBytes:&hsBlock[0x0C] length:saltLen];
-    [combined appendData:passwordUTF16];
-    CC_SHA256([combined bytes], (CC_LONG)[combined length], cookedOut);
+    // Iterate SHA-256: round 1 hashes the UTF-16 payload; later rounds hash the digest.
+    UInt32 rounds = iterations;
+    if (rounds < 1) rounds = 1000;
+    if (rounds > 1000000) rounds = 1000000;
+    UInt8 digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256([utf16 bytes], (CC_LONG)[utf16 length], digest);
+    for (UInt32 r = 1; r < rounds; r++)
+        CC_SHA256(digest, CC_SHA256_DIGEST_LENGTH, digest);
+    memcpy(cookedOut, digest, CC_SHA256_DIGEST_LENGTH);
     return 0;
 }
 
@@ -104,10 +117,15 @@ int WDScsiEncryptLegacy(SCSITaskDeviceInterface **dev, UInt8 subCmd, UInt8 flag,
     page[3] = flag;
     page[7] = 32;
     memcpy(&page[pwOffset], cooked, 32);
+    // 0x48-byte pages: arm has NEW at 0x28 and zeros at 0x08 (no current pw);
+    // disarm has OLD at 0x08 and zeros at 0x28. cookpw.py's "duplicate KEK"
+    // form is for sg_raw convenience when both slots hold the same key;
+    // arming from Off with a non-zero "old" slot is 05/74/40.
 
     SCSICommandDescriptorBlock cdb = {0};
     cdb[0] = 0xC1;
     cdb[1] = subCmd;
+    cdb[6] = g_selectedLUN;   // WD Drive Utilities onLUN: — SES is LUN 1
     cdb[8] = pageSize;
     return WDExecSCSITask(dev, cdb, kSCSICDBSize_10Byte, page, pageSize,
                         kSCSIDataTransfer_FromInitiatorToTarget, 60000);

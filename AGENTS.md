@@ -124,11 +124,22 @@ Returns `EncryptStatusReturnData` (up to 48 bytes):
 
 ### Password Cooking (Key Derivation)
 
+Matches [cookpw.py](https://github.com/KenMacD/wdpassport-utils/blob/master/cookpw.py) and [wdpassport-utils](https://github.com/0-duke/wdpassport-utils):
+
 1. Read Handy Store block 1 (opcode 0xD8, block=1)
-2. Extract salt from offset 0x0C (UTF-16LE, typically "WDC." = `57 00 44 00 43 00 2E 00`)
-3. Read iterations from offset 0x08 (32-bit LE, default 1000) — **stored but not applied**; the hash is a single SHA-256, matching WD Drive Utilities. Do not "fix" this into PBKDF2.
-4. Concatenate: salt_bytes + password_as_UTF16LE
-5. SHA-256 hash → 32-byte cooked password
+2. Salt at offset 0x0C (UTF-16LE, typically "WDC." = `57 00 44 00 43 00 2E 00`)
+3. Iterations at offset 0x08 (32-bit LE, default **1000**)
+4. `combined = salt_as_text + password` (characters, not raw bytes)
+5. Encode `combined` as UTF-16LE (no BOM)
+6. **SHA-256, repeated `iterations` times** (round 1 hashes the UTF-16 payload; later rounds hash the previous 32-byte digest) → 32-byte cooked password
+
+A single SHA-256 (the old implementation) is rejected as `05/74/40`. The Ghidra `EncryptArmWithPassword` routine receives an already-cooked buffer; iteration happens in a higher layer we did not decompile.
+
+Arm page (from Off): flag `0x01`, **zeros** at 0x08 (no old password), cooked at 0x28, `page[7]=32`.
+Disarm: flag `0x10`, cooked at 0x08, zeros at 0x28.
+Unlock: `C1 E1`, cooked at 0x08, 0x28-byte page.
+
+CDB byte 6 is the SES LUN (`onLUN:` in WD Drive Utilities). Hardcoding 0 yields `04/00/00` on Passport; the opened SES nub is LUN 1.
 
 **Important**: Before first use, the Handy Store block 1 must have:
 - Signature bytes 0-3 `00 01 44 57` (the tool checks bytes 2-3 = `44 57` and writes all four when initialising)

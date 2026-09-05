@@ -334,6 +334,7 @@ static void installMock(void) {
     g_driveIdentity = mockDriveIdentity;
     g_diskBSDName = mockDiskBSDName;
     g_verbose = 0;
+    g_selectedLUN = 0;
     memset(&g_lastSense, 0, sizeof(g_lastSense));   // deterministic start
 }
 
@@ -398,11 +399,23 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 - (void)testCookPasswordCorrectHash {
     UInt8 cooked[32] = {0};
     XCTAssertEqual(WDCookPassword(NULL, "test123", cooked), 0);
-    UInt8 expected[] = {0xDF,0x87,0x01,0xD1,0xE5,0xD3,0xD6,0xD4,
-                        0x41,0x8F,0x90,0xD6,0x29,0x3C,0xE4,0x03,
-                        0x1D,0xBB,0x56,0x93,0x6E,0x57,0x73,0xDE,
-                        0x3B,0xA9,0x69,0xD1,0x38,0x3E,0x0F,0xC2};
+    // SHA-256 iterated 1000 times over UTF-16LE("WDC." + "test123"), matching cookpw.py
+    UInt8 expected[] = {0xE1,0xE5,0xF0,0x84,0xC3,0xFC,0x50,0xEE,
+                        0xD8,0x37,0xCF,0x72,0x7A,0x1E,0x3A,0x84,
+                        0x90,0xDD,0xEE,0xE1,0x55,0xB6,0x3F,0x6B,
+                        0x81,0x30,0xF3,0xBF,0x78,0x00,0x2B,0x0E};
     XCTAssertEqual(memcmp(cooked, expected, 32), 0);
+}
+
+- (void)testCookPassword1000IterationsDiffersFromOnce {
+    // Guard against regressing to a single SHA-256 (rejected by Passport as 05/74/40)
+    UInt8 cooked[32] = {0};
+    XCTAssertEqual(WDCookPassword(NULL, "test123", cooked), 0);
+    UInt8 once[] = {0xDF,0x87,0x01,0xD1,0xE5,0xD3,0xD6,0xD4,
+                    0x41,0x8F,0x90,0xD6,0x29,0x3C,0xE4,0x03,
+                    0x1D,0xBB,0x56,0x93,0x6E,0x57,0x73,0xDE,
+                    0x3B,0xA9,0x69,0xD1,0x38,0x3E,0x0F,0xC2};
+    XCTAssertNotEqual(memcmp(cooked, once, 32), 0);
 }
 
 - (void)testCookPasswordInitializesIterations {
@@ -442,7 +455,9 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     XCTAssertEqual(r->data[0], 0x45);
     XCTAssertEqual(r->data[3], 0x01);
     XCTAssertEqual(r->data[7], 32);
-    XCTAssertNotEqual(r->data[0x28], 0); // password at 0x28
+    XCTAssertNotEqual(r->data[0x28], 0); // new password at 0x28
+    UInt8 zeros[32] = {0};
+    XCTAssertEqual(memcmp(&r->data[0x08], zeros, 32), 0, @"arm from Off: old slot must be zeros");
 }
 
 - (void)testSetPasswordRejectsMissing {

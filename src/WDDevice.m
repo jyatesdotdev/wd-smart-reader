@@ -16,6 +16,7 @@
 #import <DiskArbitration/DiskArbitration.h>
 
 uint64_t g_selectedEnclosureID = 0;
+UInt8 g_selectedLUN = 0;
 
 #pragma mark - Registry Helpers
 
@@ -167,6 +168,7 @@ SCSITaskDeviceInterface **WDOpenDevice(char *nameOut, size_t nameSize, int devic
         }
 
         uint64_t enclosureID = parentEntryID(service);
+        int lun = regInt(service, CFSTR("SCSI Logical Unit Number"));
         NSString *holder = existingUserClientHolder(service);
 
         // Create the IOKit plugin interface for SCSI task submission
@@ -220,6 +222,7 @@ SCSITaskDeviceInterface **WDOpenDevice(char *nameOut, size_t nameSize, int devic
         }
 
         g_selectedEnclosureID = enclosureID;
+        g_selectedLUN = (lun >= 0) ? (UInt8)lun : 1;   // SES is LUN 1 when the property is missing
         IOObjectRelease(iter);
         return dev;
     }
