@@ -6,10 +6,19 @@ macOS CLI tool that communicates with Western Digital external drives (MyBook, E
 
 ## Architecture
 
-- Single Objective-C file (`wd_smart.m`) using IOKit, Foundation, CoreFoundation
+- Objective-C in `src/` (see ARCHITECTURE.md): `WDScsi.m` transport + sense, `WDDevice.m` IOKit, `WDCommands.m`, `WDEncryption.m`, `main.m`
 - Talks to the SES device (LUN 1) via `IOSCSIPeripheralDeviceNub` → `SCSITaskDeviceInterface`
 - The disk LUN (LUN 0) is claimed by the kernel's block storage driver and CANNOT be accessed from userspace while mounted
-- Requires root (sudo) for `ObtainExclusiveAccess` on the SES device
+- **Root is usually NOT required**: on macOS 15 the SES LUN's `SCSITaskUserClient` opens fine as an admin user (verified uid 501 on Passport 0748). `secure-erase` needs root for `/dev/rdiskN`. Docs used to say "requires sudo" — that was over-stated.
+- Every SCSI call fills `g_lastSense`; all error paths print `WDScsiLastErrorString()`. Use `-v` to trace CDBs. Use `probe` to enumerate support.
+- Commands return `kWDExit*` codes; main propagates them (0 ok / 1 fail / 2 usage / 3 no device).
+- `--disk N` binding: `WDOpenDevice` stores the parent `IOUSBMassStorageDriver` registry ID in `g_selectedEnclosureID`; `WDFindDiskLUNService` only returns the sibling disk LUN. Never look up "the first WD disk" for destructive ops.
+
+## Testing Rules
+
+- `make test` compiles `src/*.m` **directly with `-DTESTING`** into the test binary. Never link production `.o` files into tests — the `#ifdef TESTING` guards would be inert and `WDCmdErase(..., "--confirm")` would run real `diskutil eraseDisk`.
+- Tests override `g_scsiExec`, `g_driveIdentity`, and `g_diskBSDName`. Under TESTING, erase/secure-erase print `[TESTING] would run: …` instead of acting.
+- The mock supports fault injection: `g_mock.failAll = YES; failKey/ASC/ASCQ` — use it to reproduce field sense codes.
 
 ## Device Discovery
 
@@ -163,6 +172,32 @@ Reset DEK page (for cipher 0x30/0x31 or special PIDs): 0x08 bytes, no random.
 
 **Critical**: Sense 05/74/40 means "invalid data in page" (wrong password offset or wrong password), NOT "command unsupported." The Optimus protocol (0xB5) is genuinely unsupported (05/20/00).
 
+### Reset DEK page layout (from WDDevice::EncryptResetDEK decompile)
+
+```
+CDB:  C1 E3 [KRE0 KRE1 KRE2 KRE3] [LUN] 00 [len] 00
+Page: 45 00 00 01 [cipher] 00 [count LE16] [32-byte seed]
+```
+
+| Cipher from status[4] | page[4] | count (page[6..7]) | seed | len |
+|---|---|---|---|---|
+| 0x01 | 0x01 | — | — | 0x08 |
+| 0x30 / 0x31 | same | 0 | 32 zero bytes | 0x28 |
+| 0x28 | 0x28 | 1 | 32 random | 0x28 |
+| anything else | 0x20 | 1 | 32 random | 0x28 |
+
+The count is a **little-endian UInt16 at offset 6** (`page[6]=1, page[7]=0`), not `page[7]`. Seed comes from `arc4random_buf` — never fall back to zeros for 0x20/0x28. WD's own code `exit(-1)`s if `/dev/random` can't be opened.
+
+### Sense 04/44/81 — bridge cannot reach the drive (observed 2026-09 on Passport 0748)
+
+Every command except INQUIRY/VPD returned `04/44/81` (Hardware Error / Internal Target Failure / vendor ASCQ). TEST UNIT READY returned `04/44/00`. Symptoms:
+- `diskutil list` shows nothing; LUN 0 nub has **no** `IOSCSIPeripheralDeviceType00` child, `IOServiceBusyTimeoutExtensions = 2`, ~46 s busy at enumeration
+- INQUIRY / VPD 0x80 / 0xC1 / 0xC2 still work (served from bridge firmware)
+- Encryption status (C0/45), Handy Store, diag pages, mode pages, log pages all fail
+- Closing WD Discovery did **not** help; Chrome held a WebUSB `AppleUSBHostDeviceUserClient` on the device
+
+This is not a locked-drive signature (locked drives still answer C0/45). It means the HDD isn't answering the bridge: no spin-up (power), SATA link, or wedged bridge. Remedy: power-cycle, direct port, no hub. `probe` prints this diagnosis automatically when zero drive-reaching commands succeed.
+
 ### LED Control Protocol
 
 Uses MODE SENSE/SELECT on vendor page 0x21:
@@ -235,8 +270,9 @@ WD Drive Utilities uses the same IOKit APIs we do — no kernel extensions, no s
 ## Build
 
 ```bash
-make          # clang with -fobjc-arc, Foundation, IOKit, CoreFoundation
-sudo ./wd_smart [--disk N] <command>
+make          # clang -fobjc-arc -Wall -Wextra; Foundation, IOKit, CoreFoundation, DiskArbitration
+make test     # 81 XCTests, ~10 ms, never touches hardware
+./wd_smart [--disk N] [-v] <command>     # sudo only if exclusive access fails, or for secure-erase
 ```
 
 ## Key Bugs Fixed
@@ -245,3 +281,11 @@ sudo ./wd_smart [--disk N] <command>
 2. **Info showed "SES Device"** — now reads disk LUN product from IOKit registry
 3. **Self-test results invisible** — bridge reports hours=0, old skip condition hid valid results; now uses testCode bits
 4. **Temperature raw value** — was showing packed 48-bit value, now decodes current temp from low byte
+5. **Test suite could erase a real drive** — tests linked production `.o` (no `-DTESTING`), so `testCmdEraseWithConfirm` reached `diskutil eraseDisk` whenever a WD disk was mounted. Now compiled with `-DTESTING`, `g_diskBSDName` is mocked, and NSTask isn't even linked into the test binary.
+6. **`--disk N` ignored for info/erase/secure-erase** — identity and BSD-name lookups took the first WD disk regardless of selection. Now bound via `g_selectedEnclosureID`.
+7. **Sense data discarded** — all failures were "Could not read X". Now every error carries key/ASC/ASCQ and a WD-specific interpretation.
+8. **Exit code always 0** — now 1/2/3 on failure/usage/no-device.
+9. **Stack over-read in VPD 0xC1** — 24-byte buffer, loop read up to byte 35 with ≥3 ports. Buffer sized to 36, port count clamped.
+10. **MODE SELECT length unbounded** — `buf[5] + 6` from the device could exceed the 44-byte buffer. Clamped.
+11. **Reset-DEK zero seed** — `fopen("/dev/random")` failure silently sent 32 zero bytes as the new key seed; also count byte was at offset 7 instead of LE16 at offset 6. Now `arc4random_buf` and correct layout per decompile.
+12. **Crash on non-UTF-8 password** — `stringWithUTF8String:` returned nil → `appendData:nil` threw. Now validated.

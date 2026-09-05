@@ -1,15 +1,14 @@
 CC = clang
-CFLAGS = -fobjc-arc -Wall -Isrc
+CFLAGS = -fobjc-arc -Wall -Wextra -Wno-unused-parameter -Isrc
 FRAMEWORKS = -framework Foundation -framework IOKit -framework CoreFoundation -framework DiskArbitration
 XCTEST_FLAGS = -framework XCTest \
   -F$(shell xcode-select -p)/Platforms/MacOSX.platform/Developer/Library/Frameworks \
   -rpath $(shell xcode-select -p)/Platforms/MacOSX.platform/Developer/Library/Frameworks
 
 TARGET = wd_smart
-SRCS = src/WDScsi.m src/WDDevice.m src/WDCommands.m src/WDEncryption.m src/main.m
-OBJS = $(SRCS:.m=.o)
 LIB_SRCS = src/WDScsi.m src/WDDevice.m src/WDCommands.m src/WDEncryption.m
-LIB_OBJS = $(LIB_SRCS:.m=.o)
+SRCS = $(LIB_SRCS) src/main.m
+OBJS = $(SRCS:.m=.o)
 
 all: $(TARGET)
 
@@ -19,12 +18,17 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) $(FRAMEWORKS) -o $@ $(OBJS)
 
-test: $(LIB_OBJS) wd_smart_tests.m src/WDSmart.h
-	$(CC) $(CFLAGS) $(FRAMEWORKS) $(XCTEST_FLAGS) -o wd_smart_tests $(LIB_OBJS) wd_smart_tests.m
+# Tests compile the library sources directly with -DTESTING so destructive
+# paths (diskutil eraseDisk, zero-fill, countdown sleeps) are compiled out.
+# Never link production .o files into the test binary.
+wd_smart_tests: $(LIB_SRCS) wd_smart_tests.m src/WDSmart.h
+	$(CC) $(CFLAGS) -DTESTING=1 $(FRAMEWORKS) $(XCTEST_FLAGS) -o $@ $(LIB_SRCS) wd_smart_tests.m
+
+test: wd_smart_tests
 	./wd_smart_tests
 
 coverage: $(LIB_SRCS) wd_smart_tests.m src/WDSmart.h
-	$(CC) $(CFLAGS) $(FRAMEWORKS) $(XCTEST_FLAGS) -fprofile-instr-generate -fcoverage-mapping \
+	$(CC) $(CFLAGS) -DTESTING=1 $(FRAMEWORKS) $(XCTEST_FLAGS) -fprofile-instr-generate -fcoverage-mapping \
 		-o wd_smart_tests_cov $(LIB_SRCS) wd_smart_tests.m
 	LLVM_PROFILE_FILE=wd_smart.profraw ./wd_smart_tests_cov >/dev/null 2>&1
 	xcrun llvm-profdata merge -sparse wd_smart.profraw -o wd_smart.profdata
@@ -32,7 +36,7 @@ coverage: $(LIB_SRCS) wd_smart_tests.m src/WDSmart.h
 	@rm -f wd_smart_tests_cov wd_smart.profraw wd_smart.profdata
 
 clean:
-	rm -f $(TARGET) $(OBJS) wd_smart_tests wd_smart_tests_cov wd_smart.profraw wd_smart.profdata
+	rm -f $(TARGET) $(OBJS) wd_smart_tests wd_smart_tests_cov wd_smart.profraw wd_smart.profdata probe probe_lun0
 
 install: $(TARGET)
 	cp $(TARGET) /usr/local/bin/

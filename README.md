@@ -37,15 +37,19 @@ make
 ## Test
 
 ```bash
-make test       # run 50 unit tests
+make test       # run 81 unit tests against a mock drive (never touches hardware)
 make coverage   # run tests with llvm-cov coverage report
 ```
 
 ## Usage
 
 ```bash
-sudo ./wd_smart [command]
+./wd_smart [options] <command> [args]
 ```
+
+SES access normally works as an admin user without `sudo`. Use `sudo` if you
+see "Cannot get exclusive access", and always for `secure-erase` (it writes to
+`/dev/rdiskN`).
 
 ### Commands
 
@@ -61,20 +65,38 @@ sudo ./wd_smart [command]
 | `sleep [MIN]` | Get or set sleep timer (0 = disable) |
 | `led [on\|off]` | Get or set drive LED |
 | `power-off` | Safely spin down and power off drive |
-| `set-password` | Enable drive encryption (locks on power cycle) |
-| `unlock` | Unlock a locked drive |
-| `remove-password` | Disable encryption (requires current password) |
+| `probe` | Show which SCSI pages/commands this bridge supports, with diagnosis |
+| `set-password [PW]` | Enable drive encryption (locks on power cycle); prompts if omitted |
+| `unlock [PW]` | Unlock a locked drive; prompts if omitted |
+| `remove-password [PW]` | Disable encryption (requires current password) |
 | `reset-dek` | Reset encryption key — **destroys all data** |
 | `erase` | Quick format via WD bridge (requires `--confirm`) |
 | `secure-erase` | Zero-fill every sector (requires `--confirm`) |
 | `list` | List connected WD drives |
 
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--disk N` | Select drive by index (see `list`). Binds `info`/`erase`/`secure-erase` to that enclosure. |
+| `-v`, `--verbose` | Log every SCSI CDB and its sense result to stderr |
+| `-h`, `--help` | Show usage |
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Command failed (device error — stderr shows the SCSI sense, e.g. `sense 04/44/81 (Hardware Error: …)`) |
+| 2 | Usage error / missing `--confirm` |
+| 3 | No WD device found or could not open it |
+
 ### Multi-Drive Support
 
 ```bash
-sudo ./wd_smart --disk 0 info   # first drive
-sudo ./wd_smart --disk 1 info   # second drive
-sudo ./wd_smart list            # show all connected WD drives
+./wd_smart list                 # show all connected WD drives with /dev name and serial
+./wd_smart --disk 0 info        # first drive
+./wd_smart --disk 1 info        # second drive
 ```
 
 ### Examples
@@ -89,10 +111,14 @@ sudo ./wd_smart sleep 30       # spin down after 30 min idle
 sudo ./wd_smart sleep 0        # disable sleep timer
 sudo ./wd_smart power-off      # safe eject / power off
 
-# Encryption
-sudo ./wd_smart set-password "mypassword"     # enable encryption
-sudo ./wd_smart unlock "mypassword"           # unlock after power cycle
-sudo ./wd_smart remove-password "mypassword"  # disable encryption
+# Diagnostics
+./wd_smart probe               # which pages does this bridge support?
+./wd_smart -v smart            # trace every CDB and sense code
+
+# Encryption (omit the password to be prompted securely)
+./wd_smart set-password                       # prompts: New password:
+./wd_smart unlock                             # prompts: Password:
+./wd_smart remove-password "mypassword"       # or pass it on the command line
 sudo ./wd_smart reset-dek --confirm           # nuke encryption key (DATA LOSS)
 
 # Destructive
@@ -122,12 +148,12 @@ sudo make install   # copies to /usr/local/bin
 ```
 src/
   WDSmart.h          — Shared header (types, constants, declarations)
-  WDScsi.m           — SCSI transport abstraction + command wrappers
-  WDDevice.m         — IOKit device discovery and management
-  WDCommands.m       — SMART parsing, info, temp, sleep, self-test, erase
+  WDScsi.m           — SCSI transport, sense capture/decoding, command wrappers
+  WDDevice.m         — IOKit discovery, enclosure binding for --disk, list
+  WDCommands.m       — SMART parsing, info, temp, sleep, LED, probe, self-test, erase
   WDEncryption.m     — Password cooking and encryption commands
   main.m             — CLI entry point
-wd_smart_tests.m    — 50 unit tests with mock WD drive emulator
+wd_smart_tests.m    — 81 unit tests with mock WD drive emulator (built with -DTESTING)
 Makefile            — Build, test, coverage, install
 ARCHITECTURE.md     — Design decisions and testing strategy
 AGENTS.md           — Protocol reference and development notes

@@ -7,7 +7,7 @@
 #import <sys/disk.h>
 #import <fcntl.h>
 #import <unistd.h>
-#import <dlfcn.h>
+#import <readpassphrase.h>
 #import <DiskArbitration/DiskArbitration.h>
 
 #pragma mark - SMART Attribute Name Lookup
@@ -59,6 +59,7 @@ UInt64 WDSmartRawValue(const WDSmartAttribute *attr) {
 
 /// Format a SMART attribute's raw value for display.
 /// Some attributes have packed fields that need special decoding.
+/// Returns a pointer to a static buffer (not reentrant).
 const char *WDSmartRawFormatted(const WDSmartAttribute *attr) {
     static char buf[64];
     UInt64 raw = WDSmartRawValue(attr);
@@ -115,10 +116,38 @@ const char *WDSelfTestResultString(UInt8 code) {
     }
 }
 
+/// Read a password from `arg`, or prompt with echo off when arg is NULL.
+const char *WDReadPassword(const char *arg, const char *prompt, char *out, size_t outSize) {
+    if (arg) {
+        strlcpy(out, arg, outSize);
+        return out;
+    }
+#ifdef TESTING
+    (void)prompt;
+    return NULL;
+#else
+    if (!isatty(STDIN_FILENO)) {
+        // Non-interactive: read one line from stdin
+        if (!fgets(out, (int)outSize, stdin)) return NULL;
+        out[strcspn(out, "\r\n")] = '\0';
+        return out[0] ? out : NULL;
+    }
+    if (!readpassphrase(prompt, out, outSize, RPP_ECHO_OFF | RPP_REQUIRE_TTY)) return NULL;
+    return out[0] ? out : NULL;
+#endif
+}
+
+/// Parse `--confirm` anywhere in argv (after the program name).
+static BOOL hasConfirmFlag(int argc, const char *argv[]) {
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], "--confirm") == 0) return YES;
+    return NO;
+}
+
 
 #pragma mark - SMART Command
 
-void WDCmdSmart(SCSITaskDeviceInterface **dev) {
+int WDCmdSmart(SCSITaskDeviceInterface **dev) {
     // Read SMART threshold status (page 0x84)
     // The WD SES bridge returns the ATA SMART RETURN STATUS signature bytes:
     //   Pass: LBA High=0xC2, LBA Mid=0x4F
@@ -129,94 +158,79 @@ void WDCmdSmart(SCSITaskDeviceInterface **dev) {
         BOOL failed = (statusPage.statusMSB == 0x2C && statusPage.statusLSB == 0xF4);
         const char *statusStr = passed ? "PASSED" : (failed ? "FAILED" : "UNKNOWN");
         printf("SMART Status: %s\n\n", statusStr);
+    } else {
+        fprintf(stderr, "Warning: SMART status unavailable — %s\n\n", WDScsiLastErrorString());
     }
 
     // Read full SMART attribute data (page 0x85)
     WDSmartDataPage dataPage = {0};
     if (WDScsiReceiveDiagnostic(dev, kWDDiagPageSmartData, &dataPage, sizeof(dataPage)) != 0) {
-        fprintf(stderr, "Error: Could not read SMART data\n");
-        return;
+        WDScsiPrintError("Could not read SMART data");
+        return kWDExitFailure;
     }
 
     printf("%-4s %-35s %7s %7s %s\n", "ID#", "ATTRIBUTE_NAME", "VALUE", "WORST", "RAW_VALUE");
 
     WDSmartAttributeTable *table = (WDSmartAttributeTable *)dataPage.smartData;
+    int shown = 0;
     for (int i = 0; i < 30; i++) {
         WDSmartAttribute *a = &table->attrs[i];
         if (a->id == 0) continue;
         printf("%-4d %-35s %7d %7d %s\n",
                a->id, WDSmartAttrName(a->id), a->current, a->worst, WDSmartRawFormatted(a));
+        shown++;
     }
+    if (shown == 0) {
+        fprintf(stderr, "Warning: SMART page returned no attributes\n");
+        return kWDExitFailure;
+    }
+    return kWDExitOK;
 }
-
-
 
 
 #pragma mark - Drive Identity
 
 WDDriveIdentityFn g_driveIdentity = WDDriveIdentityFromIOKit;
 
+/// Identity of the disk LUN bound to the opened enclosure (see WDFindDiskLUNService).
+/// `targetSerial`, when non-NULL, additionally filters on USB serial / product.
 WDDriveIdentity WDDriveIdentityFromIOKit(const char *targetSerial) {
     WDDriveIdentity ident = {0};
-    io_iterator_t iter;
-    CFMutableDictionaryRef match = IOServiceMatching("IOSCSIPeripheralDeviceNub");
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &iter) != KERN_SUCCESS) return ident;
+    io_service_t service = WDFindDiskLUNService();
+    if (service == IO_OBJECT_NULL) return ident;
 
-    io_service_t service;
-    while ((service = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
-        CFTypeRef vendorRef = IORegistryEntrySearchCFProperty(
-            service, kIOServicePlane, CFSTR("Vendor Identification"),
-            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
-        CFTypeRef productRef = IORegistryEntrySearchCFProperty(
-            service, kIOServicePlane, CFSTR("Product Identification"),
-            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
-        CFTypeRef devTypeRef = IORegistryEntryCreateCFProperty(
-            service, CFSTR("Peripheral Device Type"), kCFAllocatorDefault, 0);
+    CFTypeRef vendorRef = IORegistryEntrySearchCFProperty(
+        service, kIOServicePlane, CFSTR("Vendor Identification"),
+        kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+    CFTypeRef productRef = IORegistryEntrySearchCFProperty(
+        service, kIOServicePlane, CFSTR("Product Identification"),
+        kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+    CFTypeRef revRef = IORegistryEntrySearchCFProperty(
+        service, kIOServicePlane, CFSTR("Product Revision Level"),
+        kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+    CFTypeRef snRef = IORegistryEntrySearchCFProperty(
+        service, kIOServicePlane, CFSTR("USB Serial Number"),
+        kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+    IOObjectRelease(service);
 
-        NSString *vendor = vendorRef ? (__bridge_transfer NSString *)vendorRef : nil;
-        NSString *product = productRef ? (__bridge_transfer NSString *)productRef : nil;
-        NSNumber *devType = devTypeRef ? (__bridge_transfer NSNumber *)devTypeRef : nil;
+    NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
+    NSString *vendor   = vendorRef  ? [(__bridge_transfer NSString *)vendorRef  stringByTrimmingCharactersInSet:ws] : nil;
+    NSString *product  = productRef ? [(__bridge_transfer NSString *)productRef stringByTrimmingCharactersInSet:ws] : nil;
+    NSString *firmware = revRef     ? [(__bridge_transfer NSString *)revRef     stringByTrimmingCharactersInSet:ws] : nil;
+    NSString *sn       = snRef      ? (__bridge_transfer NSString *)snRef : nil;
 
-        if (!vendor || !devType) { IOObjectRelease(service); continue; }
-
-        NSString *tv = [vendor stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (![tv isEqualToString:@"WD"] && ![tv isEqualToString:@"WDC"]) {
-            IOObjectRelease(service); continue;
-        }
-
-        if ([devType intValue] != 0) { IOObjectRelease(service); continue; }
-
-        if (targetSerial) {
-            CFTypeRef snRef = IORegistryEntrySearchCFProperty(
-                service, kIOServicePlane, CFSTR("USB Serial Number"),
-                kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
-            NSString *sn = snRef ? (__bridge_transfer NSString *)snRef : nil;
-            NSString *tp = product ? [product stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] : @"";
-            if (sn && ![sn containsString:@(targetSerial)] && ![tp containsString:@(targetSerial)]) {
-                IOObjectRelease(service); continue;
-            }
-        }
-
-        CFTypeRef revRef = IORegistryEntrySearchCFProperty(
-            service, kIOServicePlane, CFSTR("Product Revision Level"),
-            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
-        NSString *firmware = revRef ? (__bridge_transfer NSString *)revRef : nil;
-
-        strlcpy(ident.vendor, [tv UTF8String], sizeof(ident.vendor));
-        if (product)
-            strlcpy(ident.product, [[product stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] UTF8String], sizeof(ident.product));
-        if (firmware)
-            strlcpy(ident.firmware, [[firmware stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] UTF8String], sizeof(ident.firmware));
-        ident.found = YES;
-
-        IOObjectRelease(service);
-        IOObjectRelease(iter);
-        return ident;
+    if (targetSerial) {
+        NSString *t = @(targetSerial);
+        if (!(sn && [sn containsString:t]) && !(product && [product containsString:t]))
+            return ident;
     }
-    IOObjectRelease(iter);
+
+    if (vendor)   strlcpy(ident.vendor,   [vendor UTF8String],   sizeof(ident.vendor));
+    if (product)  strlcpy(ident.product,  [product UTF8String],  sizeof(ident.product));
+    if (firmware) strlcpy(ident.firmware, [firmware UTF8String], sizeof(ident.firmware));
+    ident.found = YES;
     return ident;
 }
-
 
 /// Display drive identity using the provider.
 void WDPrintDriveIdentity(const char *targetSerial) {
@@ -231,7 +245,21 @@ void WDPrintDriveIdentity(const char *targetSerial) {
 
 #pragma mark - Info and Diagnostics
 
-void WDCmdInfo(SCSITaskDeviceInterface **dev) {
+/// Decode WD encryption security state byte.
+static const char *encStateName(UInt8 state) {
+    switch (state) {
+        case 0:  return "Off";
+        case 1:  return "Locked";
+        case 2:  return "Unlocked";
+        case 6:  return "Max unlocks exceeded";
+        case 7:  return "No DEK";
+        default: return "Unknown";
+    }
+}
+
+int WDCmdInfo(SCSITaskDeviceInterface **dev) {
+    int failures = 0;
+
     // Get actual drive model from the disk LUN's IOKit registry properties
     WDPrintDriveIdentity(NULL);
 
@@ -239,10 +267,12 @@ void WDCmdInfo(SCSITaskDeviceInterface **dev) {
     UInt8 snBuf[40] = {0};
     if (WDScsiInquiryVPD(dev, 0x80, snBuf, sizeof(snBuf)) == 0) {
         UInt8 len = snBuf[3];
-        if (len > 32) len = 32;
-        char serial[33] = {0};
+        if (len > sizeof(snBuf) - 4) len = sizeof(snBuf) - 4;
+        char serial[37] = {0};
         memcpy(serial, &snBuf[4], len);
-        printf("Serial:   %s\n", serial);
+        // Trim trailing whitespace (bridge pads with spaces)
+        for (int i = (int)len - 1; i >= 0 && (serial[i] == ' ' || serial[i] == '\0'); i--) serial[i] = '\0';
+        if (serial[0]) printf("Serial:   %s\n", serial);
     }
 
     // VPD page 0xB1: Block device characteristics (RPM, form factor)
@@ -252,8 +282,10 @@ void WDCmdInfo(SCSITaskDeviceInterface **dev) {
         UInt16 rpm = ((UInt16)bdc[4] << 8) | bdc[5];
         UInt8 formFactor = bdc[7] & 0x0F;
 
-        if (rpm > 0)
+        if (rpm > 1)   // 0 = not reported, 1 = non-rotating (SSD)
             printf("RPM:      %d\n", rpm);
+        else if (rpm == 1)
+            printf("Media:    Solid state\n");
 
         const char *ffStr = NULL;
         switch (formFactor) {
@@ -285,20 +317,26 @@ void WDCmdInfo(SCSITaskDeviceInterface **dev) {
     }
 
     // VPD page 0xC1: Active interfaces (USB3, USB2, etc.)
-    UInt8 ai[24] = {0};
+    // Layout: 4-byte header + N x 8-byte port descriptors. We display up to 4.
+    enum { kMaxPorts = 4 };
+    UInt8 ai[4 + kMaxPorts * 8] = {0};
     if (WDScsiInquiryVPD(dev, 0xC1, ai, sizeof(ai)) == 0) {
         UInt16 pageLen = ((UInt16)ai[2] << 8) | ai[3];
         int numPorts = pageLen / 8;
-        printf("Port:     ");
-        for (int i = 0; i < numPorts && i < 4; i++) {
-            UInt8 *port = &ai[4 + i * 8];
-            BOOL active = port[0] & 0x01;
-            char type[8] = {0};
-            memcpy(type, &port[1], 7);
-            printf("%s%s", type, active ? " (active)" : "");
-            if (i < numPorts - 1) printf(", ");
+        if (numPorts > kMaxPorts) numPorts = kMaxPorts;
+        if (numPorts > 0) {
+            printf("Port:     ");
+            for (int i = 0; i < numPorts; i++) {
+                UInt8 *port = &ai[4 + i * 8];
+                BOOL active = port[0] & 0x01;
+                char type[8] = {0};
+                memcpy(type, &port[1], 7);
+                for (int k = 6; k >= 0 && (type[k] == ' ' || type[k] == '\0'); k--) type[k] = '\0';
+                printf("%s%s", type, active ? " (active)" : "");
+                if (i < numPorts - 1) printf(", ");
+            }
+            printf("\n");
         }
-        printf("\n");
     }
 
     // Encryption status: try vendor command 0xC0/0x45 first (full status),
@@ -308,15 +346,6 @@ void WDCmdInfo(SCSITaskDeviceInterface **dev) {
     encCdb[0] = 0xC0; encCdb[1] = 0x45; encCdb[8] = 0x30;
     if (WDExecSCSITask(dev, encCdb, kSCSICDBSize_10Byte, encFull, 48,
                      kSCSIDataTransfer_FromTargetToInitiator, kTimeoutDefault) == 0 && encFull[0] == 0x45) {
-        const char *state;
-        switch (encFull[3]) {
-            case 0: state = "Off";                    break;
-            case 1: state = "Locked";                 break;
-            case 2: state = "Unlocked";               break;
-            case 6: state = "Max unlocks exceeded";   break;
-            case 7: state = "No DEK";                 break;
-            default: state = "Unknown";               break;
-        }
         const char *cipher;
         switch (encFull[4]) {
             case 0x10: cipher = "AES-128-ECB"; break;
@@ -327,73 +356,80 @@ void WDCmdInfo(SCSITaskDeviceInterface **dev) {
             default:   cipher = NULL;          break;
         }
         if (cipher)
-            printf("Encrypt:  %s (%s)\n", state, cipher);
+            printf("Encrypt:  %s (%s)\n", encStateName(encFull[3]), cipher);
         else
-            printf("Encrypt:  %s\n", state);
+            printf("Encrypt:  %s\n", encStateName(encFull[3]));
     } else {
+        char firstErr[256];
+        strlcpy(firstErr, WDScsiLastErrorString(), sizeof(firstErr));
         // Fallback to diagnostic page 0x83
         UInt8 enc[8] = {0};
         if (WDScsiReceiveDiagnostic(dev, kWDDiagPageEncryptionStatus, enc, sizeof(enc)) == 0) {
-            const char *state;
-            switch (enc[4]) {
-                case 0: state = "Off";                    break;
-                case 1: state = "Locked";                 break;
-                case 2: state = "Unlocked";               break;
-                case 6: state = "Max unlocks exceeded";   break;
-                case 7: state = "No DEK";                 break;
-                default: state = "Unknown";               break;
-            }
-            printf("Encrypt:  %s\n", state);
+            printf("Encrypt:  %s\n", encStateName(enc[4]));
+        } else {
+            printf("Encrypt:  unavailable\n");
+            fflush(stdout);
+            fprintf(stderr, "  (%s)\n", firstErr);
+            failures++;
         }
     }
+
+    return failures ? kWDExitFailure : kWDExitOK;
 }
 
 /// Start a short self-test (~2 minutes).
-void WDCmdShortTest(SCSITaskDeviceInterface **dev) {
-    if (WDScsiSendDiagnosticSelfTest(dev, kSelfTestShort) == 0)
+int WDCmdShortTest(SCSITaskDeviceInterface **dev) {
+    if (WDScsiSendDiagnosticSelfTest(dev, kSelfTestShort) == 0) {
         printf("Short self-test started (~2 minutes).\nRun 'wd_smart status' to check progress.\n");
-    else
-        fprintf(stderr, "Error: Could not start short test\n");
+        return kWDExitOK;
+    }
+    WDScsiPrintError("Could not start short test");
+    return kWDExitFailure;
 }
 
 /// Start an extended self-test (full surface scan, hours on large drives).
-void WDCmdLongTest(SCSITaskDeviceInterface **dev) {
-    if (WDScsiSendDiagnosticSelfTest(dev, kSelfTestExtend) == 0)
+int WDCmdLongTest(SCSITaskDeviceInterface **dev) {
+    if (WDScsiSendDiagnosticSelfTest(dev, kSelfTestExtend) == 0) {
         printf("Extended self-test started (may take many hours on large drives).\n"
                "Run 'wd_smart status' to check progress.\n");
-    else
-        fprintf(stderr, "Error: Could not start extended test\n");
+        return kWDExitOK;
+    }
+    WDScsiPrintError("Could not start extended test");
+    return kWDExitFailure;
 }
 
 /// Abort a running self-test.
-void WDCmdAbortTest(SCSITaskDeviceInterface **dev) {
-    if (WDScsiSendDiagnosticSelfTest(dev, kSelfTestAbort) == 0)
+int WDCmdAbortTest(SCSITaskDeviceInterface **dev) {
+    if (WDScsiSendDiagnosticSelfTest(dev, kSelfTestAbort) == 0) {
         printf("Self-test aborted.\n");
-    else
-        fprintf(stderr, "Error: Could not abort test\n");
+        return kWDExitOK;
+    }
+    WDScsiPrintError("Could not abort test");
+    return kWDExitFailure;
 }
 
 /// Display self-test results log (LOG SENSE page 0x10).
-void WDCmdStatus(SCSITaskDeviceInterface **dev) {
-    UInt8 buf[404] = {0};
+int WDCmdStatus(SCSITaskDeviceInterface **dev) {
+    enum { kEntrySize = 20, kMaxEntries = 20 };
+    UInt8 buf[4 + kMaxEntries * kEntrySize] = {0};
     if (WDScsiLogSense(dev, 0x10, buf, sizeof(buf)) != 0) {
-        fprintf(stderr, "Error: Could not read self-test log\n");
-        return;
+        WDScsiPrintError("Could not read self-test log");
+        return kWDExitFailure;
     }
 
     UInt16 pageLen = ((UInt16)buf[2] << 8) | buf[3];
-    if (pageLen < 20) {
+    if (pageLen > sizeof(buf) - 4) pageLen = sizeof(buf) - 4;
+    if (pageLen < kEntrySize) {
         printf("No self-test results available.\n");
-        return;
+        return kWDExitOK;
     }
 
     printf("%-6s %-6s %-14s %-8s %s\n", "TEST#", "TYPE", "RESULT", "HOURS", "FIRST_ERROR_LBA");
 
-    int entries = pageLen / 20;
-    if (entries > 20) entries = 20;
+    int entries = pageLen / kEntrySize;
 
     for (int i = 0; i < entries; i++) {
-        UInt8 *entry = &buf[4 + i * 20];
+        UInt8 *entry = &buf[4 + i * kEntrySize];
         UInt8 testCode = (entry[4] >> 5) & 0x07;
         UInt8 result   = entry[4] & 0x0F;
         UInt8 testNum  = entry[5];
@@ -412,16 +448,19 @@ void WDCmdStatus(SCSITaskDeviceInterface **dev) {
             default: typeStr = "Other";   break;
         }
 
+        char lbaStr[24] = "-";
+        if (result >= 3 && result <= 8) snprintf(lbaStr, sizeof(lbaStr), "%llu", lba);
+
         printf("%-6d %-6s %-14s %-8d %s\n",
-               testNum, typeStr, WDSelfTestResultString(result), hours,
-               (result >= 3 && result <= 8)
-                   ? [[NSString stringWithFormat:@"%llu", lba] UTF8String]
-                   : "-");
+               testNum, typeStr, WDSelfTestResultString(result), hours, lbaStr);
     }
+    return kWDExitOK;
 }
 
 /// Display drive temperature (from SMART attribute 194 and/or diag page 0x86).
-void WDCmdTemp(SCSITaskDeviceInterface **dev) {
+int WDCmdTemp(SCSITaskDeviceInterface **dev) {
+    BOOL gotSomething = NO;
+
     // Try WD-specific temperature diagnostic page
     WDTemperaturePage tempPage = {0};
     if (WDScsiReceiveDiagnostic(dev, kWDDiagPageTemperature, &tempPage, sizeof(tempPage)) == 0) {
@@ -440,6 +479,7 @@ void WDCmdTemp(SCSITaskDeviceInterface **dev) {
 
         UInt16 pwm = ntohs(tempPage.fanCurrentPWM);
         if (pwm > 0) printf("Fan PWM:  %d / %d (current / goal)\n", pwm, ntohs(tempPage.fanGoalPWM));
+        gotSomething = YES;
     }
 
     // Get temperature from SMART attribute 194 (most reliable)
@@ -447,24 +487,32 @@ void WDCmdTemp(SCSITaskDeviceInterface **dev) {
     if (WDScsiReceiveDiagnostic(dev, kWDDiagPageSmartData, &dataPage, sizeof(dataPage)) == 0) {
         WDSmartAttributeTable *table = (WDSmartAttributeTable *)dataPage.smartData;
         for (int i = 0; i < 30; i++) {
-            if (table->attrs[i].id == 194) {
+            if (table->attrs[i].id == 194 || table->attrs[i].id == 190) {
                 printf("Drive:    %llu°C\n", WDSmartRawValue(&table->attrs[i]) & 0xFF);
-                return;
+                return kWDExitOK;
             }
         }
+        if (!gotSomething) fprintf(stderr, "Error: No temperature attribute in SMART data\n");
+    } else if (!gotSomething) {
+        WDScsiPrintError("Could not read temperature");
     }
+    return gotSomething ? kWDExitOK : kWDExitFailure;
 }
 
 /// Get or set the drive sleep (spindown) timer.
 /// When setValue is NULL, displays current setting. Otherwise sets it.
-void WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
+int WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
     // Power Condition mode page (0x1A) with DBD.
     // Response layout: [0..3]=header, [4]=pageCode|PS, [5]=pageLen, [6..]=page data
-    // WD standby timer is a 2-byte BE value at absolute offset 14-15 (page data byte 8-9)
+    // WD standby timer is a 4-byte BE value at absolute offset 12-15 (page data byte 6-9)
     UInt8 buf[44] = {0};
     if (WDScsiModeSense(dev, 0x1A, buf, sizeof(buf)) != 0) {
-        fprintf(stderr, "Error: Could not read sleep timer\n");
-        return;
+        WDScsiPrintError("Could not read sleep timer");
+        return kWDExitFailure;
+    }
+    if ((buf[4] & 0x3F) != 0x1A) {
+        fprintf(stderr, "Error: Unexpected mode page 0x%02X (expected 0x1A)\n", buf[4] & 0x3F);
+        return kWDExitFailure;
     }
 
     if (!setValue) {
@@ -474,236 +522,321 @@ void WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
             printf("Sleep timer: disabled (never)\n");
         else
             printf("Sleep timer: ~%u minutes (%u seconds)\n", timer / 600, timer / 10);
-    } else {
-        int minutes = atoi(setValue);
-        UInt32 timerVal = (minutes <= 0) ? 0 : (UInt32)minutes * 600;
-
-        // Clear mode parameter header and PS bit
-        memset(buf, 0, 4);
-        buf[4] &= 0x3F;
-
-        // buf[7] bit 0 = Standby_z enable
-        if (timerVal > 0)
-            buf[7] |= 0x01;
-        else
-            buf[7] &= ~0x01;
-
-        // Write standby timer (4-byte BE at offset 12-15)
-        buf[12] = (timerVal >> 24) & 0xFF;
-        buf[13] = (timerVal >> 16) & 0xFF;
-        buf[14] = (timerVal >> 8) & 0xFF;
-        buf[15] = timerVal & 0xFF;
-
-        // Parameter list length = page length + 6 (4 header + 2 page header)
-        UInt8 paramLen = buf[5] + 6;
-        if (WDScsiModeSelect(dev, buf, paramLen, YES) == 0) {
-            if (minutes <= 0)
-                printf("Sleep timer disabled.\n");
-            else
-                printf("Sleep timer set to %d minutes.\n", minutes);
-        } else {
-            fprintf(stderr, "Error: Could not set sleep timer\n");
-        }
+        return kWDExitOK;
     }
+
+    char *end = NULL;
+    long minutes = strtol(setValue, &end, 10);
+    if (!end || *end || minutes < 0 || minutes > 7158) {   // 7158 min ≈ UInt32 max / 600
+        fprintf(stderr, "Usage: wd_smart sleep <minutes>   (0 = disable)\n");
+        return kWDExitUsage;
+    }
+    UInt32 timerVal = (UInt32)minutes * 600;
+
+    // Clear mode parameter header and PS bit
+    memset(buf, 0, 4);
+    buf[4] &= 0x3F;
+
+    // buf[7] bit 0 = Standby_z enable
+    if (timerVal > 0)
+        buf[7] |= 0x01;
+    else
+        buf[7] &= ~0x01;
+
+    // Write standby timer (4-byte BE at offset 12-15)
+    buf[12] = (timerVal >> 24) & 0xFF;
+    buf[13] = (timerVal >> 16) & 0xFF;
+    buf[14] = (timerVal >> 8) & 0xFF;
+    buf[15] = timerVal & 0xFF;
+
+    // Parameter list length = page length + 6 (4 header + 2 page header), bounded by buffer
+    UInt32 paramLen = (UInt32)buf[5] + 6;
+    if (paramLen > sizeof(buf)) paramLen = sizeof(buf);
+    if (paramLen < 16) paramLen = 16;   // must include the timer bytes
+
+    if (WDScsiModeSelect(dev, buf, paramLen, YES) == 0) {
+        if (minutes == 0)
+            printf("Sleep timer disabled.\n");
+        else
+            printf("Sleep timer set to %ld minutes.\n", minutes);
+        return kWDExitOK;
+    }
+    WDScsiPrintError("Could not set sleep timer");
+    if (minutes == 0)
+        fprintf(stderr, "  (Some bridges enforce a minimum and reject 0. Try 'sleep 10'.)\n");
+    return kWDExitFailure;
 }
 
 
 #pragma mark - LED Control
 
-void WDCmdLED(SCSITaskDeviceInterface **dev, const char *setValue) {
+int WDCmdLED(SCSITaskDeviceInterface **dev, const char *setValue) {
     UInt8 buf[16] = {0};
     if (WDScsiModeSense(dev, 0x21, buf, sizeof(buf)) != 0) {
-        fprintf(stderr, "Error: LED not supported on this drive\n");
-        return;
+        WDScsiPrintError("LED not supported on this drive");
+        return kWDExitFailure;
+    }
+    if ((buf[4] & 0x3F) != 0x21) {
+        fprintf(stderr, "Error: LED not supported (got mode page 0x%02X, expected 0x21)\n", buf[4] & 0x3F);
+        return kWDExitFailure;
     }
 
     if (!setValue) {
         printf("LED: %s\n", buf[12] ? "on" : "off");
-    } else {
-        BOOL on;
-        if (strcmp(setValue, "on") == 0) on = YES;
-        else if (strcmp(setValue, "off") == 0) on = NO;
-        else { fprintf(stderr, "Usage: wd_smart led [on|off]\n"); return; }
-
-        memset(buf, 0, 4);
-        buf[4] &= 0x7F;
-        buf[12] = on ? 0xFF : 0x00;
-
-        if (WDScsiModeSelect(dev, buf, 16, YES) == 0)
-            printf("LED turned %s.\n", on ? "on" : "off");
-        else
-            fprintf(stderr, "Error: Could not set LED\n");
+        return kWDExitOK;
     }
+
+    BOOL on;
+    if (strcmp(setValue, "on") == 0) on = YES;
+    else if (strcmp(setValue, "off") == 0) on = NO;
+    else { fprintf(stderr, "Usage: wd_smart led [on|off]\n"); return kWDExitUsage; }
+
+    memset(buf, 0, 4);
+    buf[4] &= 0x7F;
+    buf[12] = on ? 0xFF : 0x00;
+
+    if (WDScsiModeSelect(dev, buf, 16, YES) == 0) {
+        printf("LED turned %s.\n", on ? "on" : "off");
+        return kWDExitOK;
+    }
+    WDScsiPrintError("Could not set LED");
+    return kWDExitFailure;
+}
+
+#pragma mark - Probe
+
+/// Run one probe command and print a one-line result.
+static int probeOne(SCSITaskDeviceInterface **dev, const char *label,
+                    const UInt8 *cdbBytes, UInt8 cdbLen, UInt8 *buf, UInt32 size, UInt8 dir) {
+    SCSICommandDescriptorBlock cdb = {0};
+    memcpy(cdb, cdbBytes, cdbLen);
+    if (buf) memset(buf, 0, size);
+    int rc = WDExecSCSITask(dev, cdb, cdbLen, buf, size, dir, kTimeoutDefault);
+    if (rc == 0) {
+        printf("  %-34s OK", label);
+        if (buf && g_lastSense.transferred) {
+            printf("  [");
+            UInt64 n = g_lastSense.transferred < 16 ? g_lastSense.transferred : 16;
+            for (UInt64 i = 0; i < n; i++) printf("%02X%s", buf[i], i + 1 < n ? " " : "");
+            if (g_lastSense.transferred > 16) printf(" …");
+            printf("]");
+        }
+        printf("\n");
+    } else if (g_lastSense.ioReturn != kIOReturnSuccess) {
+        printf("  %-34s IOKit error 0x%08x\n", label, g_lastSense.ioReturn);
+    } else {
+        // Short form: key/asc/ascq + key name (the summary explains 04/44/81)
+        static const char *keys[] = {"No Sense","Recovered","Not Ready","Medium Error","Hardware Error",
+            "Illegal Request","Unit Attention","Data Protect","Blank Check","Vendor","Copy Aborted",
+            "Aborted Command","Equal","Volume Overflow","Miscompare","Completed"};
+        printf("  %-34s sense %02X/%02X/%02X (%s)\n", label,
+               g_lastSense.senseKey, g_lastSense.asc, g_lastSense.ascq, keys[g_lastSense.senseKey & 0x0F]);
+    }
+    return rc;
+}
+
+/// Enumerate what this bridge supports. Read-only; safe on any drive.
+int WDCmdProbe(SCSITaskDeviceInterface **dev) {
+    UInt8 buf[520];
+    int ok = 0, total = 0;
+    int driveOK = 0;          // successes among commands that must reach the SATA drive
+    BOOL sawBridgeFault = NO; // any 04/44/xx
+#define PROBE(label, dir, sz, ...) do { \
+        static const UInt8 c_[] = {__VA_ARGS__}; \
+        total++; \
+        if (probeOne(dev, label, c_, sizeof(c_), buf, sz, dir) == 0) { ok++; if (driveSection) driveOK++; } \
+        else if (g_lastSense.senseKey == 0x04 && g_lastSense.asc == 0x44) sawBridgeFault = YES; \
+    } while (0)
+    BOOL driveSection = NO;
+    const UInt8 RX = kSCSIDataTransfer_FromTargetToInitiator;
+    const UInt8 NONE = kSCSIDataTransfer_NoDataTransfer;
+
+    printf("Standard SCSI:\n");
+    PROBE("TEST UNIT READY",          NONE, 0,   0x00,0,0,0,0,0);
+    PROBE("INQUIRY",                  RX,   96,  0x12,0x00,0x00,0x00,96,0x00);
+    PROBE("INQUIRY VPD 0x00 (list)",  RX,   64,  0x12,0x01,0x00,0x00,64,0x00);
+    // Decode supported VPD list
+    if (buf[0] == 0x0D || buf[0] == 0x00) {
+        int n = buf[3];
+        if (n > 0 && n < 60) {
+            printf("    supported VPD pages:");
+            for (int i = 0; i < n; i++) printf(" %02X", buf[4 + i]);
+            printf("\n");
+        }
+    }
+    PROBE("INQUIRY VPD 0x80 (serial)", RX,  64,  0x12,0x01,0x80,0x00,64,0x00);
+    PROBE("INQUIRY VPD 0xB1 (RPM)",   RX,   64,  0x12,0x01,0xB1,0x00,64,0x00);
+    PROBE("INQUIRY VPD 0xC1 (ports)", RX,   36,  0x12,0x01,0xC1,0x00,36,0x00);
+    PROBE("INQUIRY VPD 0xC2 (capacity)", RX, 24, 0x12,0x01,0xC2,0x00,24,0x00);
+    PROBE("INQUIRY VPD 0xC4 (product)", RX, 255, 0x12,0x01,0xC4,0x00,255,0x00);
+
+    driveSection = YES;
+    printf("\nDiagnostic pages (RECEIVE DIAGNOSTIC 0x1C):\n");
+    PROBE("0x00 supported pages",      RX,   64,  0x1C,0x01,0x00,0x00,64,0x00);
+    if (buf[0] == 0x00) {
+        int n = ((int)buf[2] << 8) | buf[3];
+        if (n > 0 && n < 60) {
+            printf("    supported diag pages:");
+            for (int i = 0; i < n; i++) printf(" %02X", buf[4 + i]);
+            printf("\n");
+        }
+    }
+    PROBE("0x83 encryption (simple)",  RX,   8,   0x1C,0x01,0x83,0x00,8,0x00);
+    PROBE("0x84 SMART status",         RX,   8,   0x1C,0x01,0x84,0x00,8,0x00);
+    PROBE("0x85 SMART data",           RX,   520, 0x1C,0x01,0x85,0x02,0x08,0x00);
+    PROBE("0x86 temperature/fan",      RX,   16,  0x1C,0x01,0x86,0x00,16,0x00);
+
+    printf("\nLog / mode pages:\n");
+    PROBE("LOG SENSE 0x00 (list)",     RX,   64,  0x4D,0x00,0x40,0,0,0,0,0x00,64,0x00);
+    PROBE("LOG SENSE 0x10 (self-test)", RX,  404, 0x4D,0x00,0x50,0,0,0,0,0x01,0x94,0x00);
+    PROBE("MODE SENSE 0x1A (power)",   RX,   44,  0x1A,0x08,0x1A,0x00,44,0x00);
+    PROBE("MODE SENSE 0x21 (LED)",     RX,   16,  0x1A,0x08,0x21,0x00,16,0x00);
+    PROBE("MODE SENSE 0x24 (VCD)",     RX,   16,  0x1A,0x08,0x24,0x00,16,0x00);
+
+    printf("\nWD vendor commands:\n");
+    PROBE("C0/45 encryption status",   RX,   48,  0xC0,0x45,0,0,0,0,0,0,0x30,0x00);
+    PROBE("D8 Handy Store read blk 1", RX,   512, 0xD8,0,0,0,0,1,0,0,0x01,0x00);
+    PROBE("A2 Optimus probe",          RX,   16,  0xA2,0,0,0,0,0,0,0,0,16,0,0);
+#undef PROBE
+
+    printf("\n%d/%d commands succeeded.\n", ok, total);
+    if (driveOK == 0) {
+        printf("\nDIAGNOSIS: Only INQUIRY-class commands work. The bridge answers from its own\n"
+               "firmware but cannot reach the SATA drive%s.\n"
+               "  - Unplug the enclosure, wait 10 s, plug it directly into the Mac (no hub)\n"
+               "  - If it has a power adapter, check it; bus-powered drives need a full-power port\n"
+               "  - Quit WD Discovery / WD Security and close browser tabs with WebUSB access\n"
+               "  - If it persists across ports/cables, the drive or bridge has likely failed\n",
+               sawBridgeFault ? " (sense 04/44/xx = internal target failure)" : "");
+        return kWDExitFailure;
+    }
+    return kWDExitOK;
 }
 
 #pragma mark - Power and Erase
 
-void WDCmdPowerOff(SCSITaskDeviceInterface **dev) {
+int WDCmdPowerOff(SCSITaskDeviceInterface **dev) {
     // WD power control via diagnostic page 0x80
     UInt8 page[8] = {0};
     page[0] = 0x80;   // page code
     page[3] = 0x04;   // page length
     page[4] = 0x01;   // bit 0 = PowerOff
 
-    if (WDScsiSendDiagnosticPage(dev, page, sizeof(page)) == 0)
+    if (WDScsiSendDiagnosticPage(dev, page, sizeof(page)) == 0) {
         printf("Drive powered off safely. You can disconnect it now.\n");
-    else
-        fprintf(stderr, "Error: Power off failed. Try 'diskutil eject /dev/diskN' instead.\n");
+        return kWDExitOK;
+    }
+    WDScsiPrintError("Power off failed");
+    fprintf(stderr, "  Try 'diskutil eject /dev/diskN' instead.\n");
+    return kWDExitFailure;
 }
 
 /// Erase the drive using diskutil (same method as WD Drive Utilities).
-/// Repartitions with a single ExFAT volume.
-void WDCmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
+/// Repartitions with a single ExFAT volume named after the product.
+int WDCmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
     (void)dev;
-    BOOL confirmed = NO;
-    for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--confirm") == 0) confirmed = YES;
-    }
-
-    if (!confirmed) {
+    if (!hasConfirmFlag(argc, argv)) {
         fprintf(stderr,
             "WARNING: This will PERMANENTLY ERASE ALL DATA on the drive.\n"
             "         This operation is IRREVERSIBLE.\n\n"
             "To proceed, run:\n"
             "  sudo wd_smart erase --confirm\n");
-        return;
+        return kWDExitUsage;
     }
 
-    NSString *bsdName = WDFindDiskBSDName();
+    NSString *bsdName = g_diskBSDName();
     if (!bsdName) {
-        fprintf(stderr, "Error: Could not find WD disk device\n");
-        return;
+        fprintf(stderr, "Error: Could not find WD disk device (is the drive locked or not spun up?)\n");
+        return kWDExitFailure;
+    }
+
+    // Volume label from the product name, e.g. "My Passport" / "My Book"
+    WDDriveIdentity ident = g_driveIdentity(NULL);
+    NSString *label = @"WD Drive";
+    if (ident.found && ident.product[0]) {
+        NSString *p = @(ident.product);
+        NSRange r = [p rangeOfString:@" " options:NSBackwardsSearch];
+        if (r.location != NSNotFound && r.location > 0) p = [p substringToIndex:r.location]; // drop model suffix
+        if (p.length) label = p;
     }
 
     fprintf(stderr, "*** ALL DATA ON /dev/%s WILL BE DESTROYED ***\n", [bsdName UTF8String]);
     fprintf(stderr, "Press Ctrl-C to cancel.\n\n");
-#ifndef TESTING
+#ifdef TESTING
+    fprintf(stderr, "[TESTING] would run: diskutil eraseDisk ExFAT \"%s\" GPT /dev/%s\n",
+            [label UTF8String], [bsdName UTF8String]);
+    return kWDExitOK;
+#else
     for (int i = 5; i > 0; i--) {
         fprintf(stderr, "  Erasing in %d...\n", i);
         sleep(1);
     }
-#endif
 
     fprintf(stderr, "Erasing /dev/%s...\n", [bsdName UTF8String]);
 
     // Use NSTask + diskutil eraseDisk (same as WD Drive Utilities)
     NSTask *task = [[NSTask alloc] init];
     [task setLaunchPath:@"/usr/sbin/diskutil"];
-    [task setArguments:@[@"eraseDisk", @"ExFAT", @"My Book", @"GPT",
+    [task setArguments:@[@"eraseDisk", @"ExFAT", label, @"GPT",
                          [NSString stringWithFormat:@"/dev/%@", bsdName]]];
     NSPipe *pipe = [NSPipe pipe];
     [task setStandardOutput:pipe];
     [task setStandardError:pipe];
-    [task launch];
+    @try {
+        [task launch];
+    } @catch (NSException *e) {
+        fprintf(stderr, "Error: Could not launch diskutil: %s\n", [[e reason] UTF8String]);
+        return kWDExitFailure;
+    }
     [task waitUntilExit];
 
     NSData *output = [[pipe fileHandleForReading] readDataToEndOfFile];
-    NSString *result = [[NSString alloc] initWithData:output encoding:NSUTF8StringEncoding];
+    NSString *result = [[NSString alloc] initWithData:output encoding:NSUTF8StringEncoding] ?: @"";
 
-    if ([task terminationStatus] == 0)
-        printf("Erase complete. Drive formatted as ExFAT.\n");
-    else
-        fprintf(stderr, "Error: Erase failed.\n%s\n", [result UTF8String]);
+    if ([task terminationStatus] == 0) {
+        printf("Erase complete. Drive formatted as ExFAT (\"%s\").\n", [label UTF8String]);
+        return kWDExitOK;
+    }
+    fprintf(stderr, "Error: Erase failed (diskutil exit %d).\n%s\n",
+            [task terminationStatus], [result UTF8String]);
+    return kWDExitFailure;
+#endif
 }
 
-/// Find the BSD name (e.g. "disk12") of the WD disk LUN (not the SES device).
 
 #pragma mark - Secure Erase
-
-NSString *WDFindDiskBSDName(void) {
-    io_iterator_t iter;
-    io_service_t service;
-
-    CFMutableDictionaryRef match = IOServiceMatching("IOSCSIPeripheralDeviceNub");
-    kern_return_t kr = IOServiceGetMatchingServices(kIOMainPortDefault, match, &iter);
-    if (kr != KERN_SUCCESS) return nil;
-
-    while ((service = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
-        CFTypeRef vendorRef = IORegistryEntrySearchCFProperty(
-            service, kIOServicePlane, CFSTR("Vendor Identification"),
-            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
-        CFTypeRef productRef = IORegistryEntrySearchCFProperty(
-            service, kIOServicePlane, CFSTR("Product Identification"),
-            kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
-
-        NSString *vendor = vendorRef ? (__bridge_transfer NSString *)vendorRef : nil;
-        NSString *product = productRef ? (__bridge_transfer NSString *)productRef : nil;
-        if (!vendor) { IOObjectRelease(service); continue; }
-
-        NSString *tv = [vendor stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (![tv isEqualToString:@"WD"] && ![tv isEqualToString:@"WDC"]) {
-            IOObjectRelease(service); continue;
-        }
-
-        // Skip the SES device — we want the actual disk LUN
-        NSString *tp = product
-            ? [product stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]
-            : @"";
-        if ([tp containsString:@"SES"]) { IOObjectRelease(service); continue; }
-
-        // Walk children to find the whole-disk IOMedia node
-        io_iterator_t childIter;
-        kr = IORegistryEntryCreateIterator(service, kIOServicePlane,
-            kIORegistryIterateRecursively, &childIter);
-        IOObjectRelease(service);
-        if (kr != KERN_SUCCESS) continue;
-
-        io_service_t child;
-        while ((child = IOIteratorNext(childIter)) != IO_OBJECT_NULL) {
-            io_name_t className;
-            IOObjectGetClass(child, className);
-            if (strcmp(className, "IOMedia") == 0) {
-                CFTypeRef wholeRef = IORegistryEntryCreateCFProperty(
-                    child, CFSTR("Whole"), kCFAllocatorDefault, 0);
-                if (wholeRef && CFBooleanGetValue(wholeRef)) {
-                    CFTypeRef bsdRef = IORegistryEntryCreateCFProperty(
-                        child, CFSTR("BSD Name"), kCFAllocatorDefault, 0);
-                    if (bsdRef) {
-                        NSString *bsd = (__bridge_transfer NSString *)bsdRef;
-                        CFRelease(wholeRef);
-                        IOObjectRelease(child);
-                        IOObjectRelease(childIter);
-                        IOObjectRelease(iter);
-                        return bsd;
-                    }
-                }
-                if (wholeRef) CFRelease(wholeRef);
-            }
-            IOObjectRelease(child);
-        }
-        IOObjectRelease(childIter);
-    }
-    IOObjectRelease(iter);
-    return nil;
-}
 
 /// Secure erase: overwrite every sector with zeros.
 /// This is a full single-pass zero-fill — every byte on disk becomes 0x00.
 /// Requires --confirm and gives a 10-second countdown before starting.
-void WDCmdSecureErase(int argc, const char *argv[]) {
-    BOOL confirmed = NO;
-    for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--confirm") == 0) confirmed = YES;
-    }
-
-    if (!confirmed) {
+int WDCmdSecureErase(int argc, const char *argv[]) {
+    if (!hasConfirmFlag(argc, argv)) {
         fprintf(stderr,
             "WARNING: SECURE ERASE writes zeros to EVERY SECTOR on the drive.\n"
             "         This is IRREVERSIBLE and will take 20+ hours on 18TB.\n\n"
             "To proceed, run:\n"
             "  sudo wd_smart secure-erase --confirm\n");
-        return;
+        return kWDExitUsage;
+    }
+
+    if (geteuid() != 0) {
+        fprintf(stderr, "Error: secure-erase must run as root (writes to /dev/rdiskN).\n");
+        return kWDExitFailure;
     }
 
     // Find the WD disk's BSD name
-    NSString *bsdName = WDFindDiskBSDName();
+    NSString *bsdName = g_diskBSDName();
     if (!bsdName) {
         fprintf(stderr, "Error: Could not find WD disk device\n");
-        return;
+        return kWDExitFailure;
     }
 
     printf("Target: /dev/%s\n\n", [bsdName UTF8String]);
 
+#ifdef TESTING
+    fprintf(stderr, "[TESTING] would zero-fill /dev/r%s\n", [bsdName UTF8String]);
+    return kWDExitOK;
+#else
     // 10-second countdown (longer due to severity)
     fprintf(stderr, "*** SECURE ERASE: EVERY BYTE WILL BE OVERWRITTEN WITH ZEROS ***\n");
     fprintf(stderr, "*** This will take many hours. Press Ctrl-C to cancel. ***\n\n");
@@ -714,7 +847,8 @@ void WDCmdSecureErase(int argc, const char *argv[]) {
 
     // Unmount all volumes using DiskArbitration
     DASessionRef session = DASessionCreate(kCFAllocatorDefault);
-    if (!session) { fprintf(stderr, "Error: Could not create DA session\n"); return; }
+    if (!session) { fprintf(stderr, "Error: Could not create DA session\n"); return kWDExitFailure; }
+    DASessionScheduleWithRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
     DADiskRef daDisk = DADiskCreateFromBSDName(kCFAllocatorDefault, session,
                                                [[NSString stringWithFormat:@"/dev/%@", bsdName] UTF8String]);
     if (daDisk) {
@@ -722,6 +856,7 @@ void WDCmdSecureErase(int argc, const char *argv[]) {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 2.0, false);
         CFRelease(daDisk);
     }
+    DASessionUnscheduleFromRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
     CFRelease(session);
 
     // Open raw character device for writing
@@ -730,30 +865,42 @@ void WDCmdSecureErase(int argc, const char *argv[]) {
     if (fd < 0) {
         fprintf(stderr, "Error: Could not open %s: %s\n",
                 [rawPath UTF8String], strerror(errno));
-        return;
+        return kWDExitFailure;
     }
 
     // Get device size via ioctl
     UInt64 blockCount = 0;
     UInt32 blockSize = 512;
-    ioctl(fd, DKIOCGETBLOCKCOUNT, &blockCount);
-    ioctl(fd, DKIOCGETBLOCKSIZE, &blockSize);
+    if (ioctl(fd, DKIOCGETBLOCKCOUNT, &blockCount) != 0) blockCount = 0;
+    if (ioctl(fd, DKIOCGETBLOCKSIZE, &blockSize) != 0) blockSize = 512;
     UInt64 deviceSize = blockCount * blockSize;
 
-    // Write zeros in 1MB chunks with progress reporting
-    const size_t chunkSize = 1024 * 1024;
+    // Write zeros in 4MB chunks (USB3-friendly) with progress reporting
+    const size_t chunkSize = 4 * 1024 * 1024;
     void *zeros = calloc(1, chunkSize);
-    if (!zeros) { close(fd); fprintf(stderr, "Error: Out of memory\n"); return; }
+    if (!zeros) { close(fd); fprintf(stderr, "Error: Out of memory\n"); return kWDExitFailure; }
 
     UInt64 written = 0;
     time_t startTime = time(NULL);
     time_t lastReport = 0;
-    ssize_t n;
+    int rc = kWDExitOK;
 
     printf("\nSecure erase in progress...\n");
 
-    while ((n = write(fd, zeros, chunkSize)) > 0) {
-        written += n;
+    for (;;) {
+        size_t want = chunkSize;
+        if (deviceSize && deviceSize - written < want) want = (size_t)(deviceSize - written);
+        if (want == 0) break;
+        ssize_t n = write(fd, zeros, want);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == ENOSPC) break;   // reached end of device
+            fprintf(stderr, "\nError: write failed at %llu bytes: %s\n", written, strerror(errno));
+            rc = kWDExitFailure;
+            break;
+        }
+        if (n == 0) break;
+        written += (UInt64)n;
 
         time_t now = time(NULL);
         if (now - lastReport >= 5) {
@@ -775,13 +922,15 @@ void WDCmdSecureErase(int argc, const char *argv[]) {
     }
 
     free(zeros);
+    fsync(fd);
     close(fd);
 
     double elapsed = difftime(time(NULL), startTime);
-    printf("\n\nSecure erase complete.\n");
+    printf("\n\nSecure erase %s.\n", rc == kWDExitOK ? "complete" : "INCOMPLETE");
     printf("  Written: %.2f TB\n", (double)written / 1e12);
     printf("  Time:    %.1f hours\n", elapsed / 3600.0);
     if (elapsed > 0)
         printf("  Speed:   %.1f MB/s average\n", (double)written / elapsed / 1e6);
+    return rc;
+#endif
 }
-

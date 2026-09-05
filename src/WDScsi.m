@@ -5,7 +5,77 @@
 
 #import "WDSmart.h"
 
+#pragma mark - Globals
 
+WDScsiSense g_lastSense = {0};
+int g_verbose = 0;
+
+#pragma mark - Sense Decoding
+
+static const char *senseKeyName(UInt8 key) {
+    switch (key) {
+        case 0x0: return "No Sense";
+        case 0x1: return "Recovered Error";
+        case 0x2: return "Not Ready";
+        case 0x3: return "Medium Error";
+        case 0x4: return "Hardware Error";
+        case 0x5: return "Illegal Request";
+        case 0x6: return "Unit Attention";
+        case 0x7: return "Data Protect";
+        case 0x8: return "Blank Check";
+        case 0xB: return "Aborted Command";
+        default:  return "Reserved";
+    }
+}
+
+/// Decode common ASC/ASCQ pairs, including WD-bridge-specific meanings
+/// learned from hardware testing (see AGENTS.md).
+static const char *ascName(UInt8 asc, UInt8 ascq) {
+    switch ((asc << 8) | ascq) {
+        case 0x0000: return "No additional sense";
+        case 0x0400: return "LUN not ready, cause not reportable";
+        case 0x0401: return "LUN is in process of becoming ready";
+        case 0x0402: return "LUN not ready, initializing command required";
+        case 0x1A00: return "Parameter list length error";
+        case 0x2000: return "Invalid command operation code (unsupported)";
+        case 0x2400: return "Invalid field in CDB";
+        case 0x2500: return "Logical unit not supported";
+        case 0x2600: return "Invalid field in parameter list";
+        case 0x2900: return "Power on, reset, or bus device reset occurred";
+        case 0x3A00: return "Medium not present";
+        case 0x4400: return "Internal target failure";
+        case 0x4481: return "Internal target failure: bridge cannot reach the SATA drive "
+                            "(drive not spinning / locked / SATA link down — try power-cycling the enclosure)";
+        case 0x7440: return "Invalid data in page (WD: wrong password or wrong page layout)";
+        default:     return NULL;
+    }
+}
+
+const char *WDScsiLastErrorString(void) {
+    static char buf[256];
+    const WDScsiSense *s = &g_lastSense;
+    if (!s->valid) {
+        snprintf(buf, sizeof(buf), "no command executed");
+    } else if (s->ioReturn != kIOReturnSuccess) {
+        snprintf(buf, sizeof(buf), "IOKit error 0x%08x", s->ioReturn);
+    } else if (s->taskStatus != kSCSITaskStatus_GOOD) {
+        const char *desc = ascName(s->asc, s->ascq);
+        if (desc)
+            snprintf(buf, sizeof(buf), "sense %02X/%02X/%02X (%s: %s)",
+                     s->senseKey, s->asc, s->ascq, senseKeyName(s->senseKey), desc);
+        else
+            snprintf(buf, sizeof(buf), "sense %02X/%02X/%02X (%s)",
+                     s->senseKey, s->asc, s->ascq, senseKeyName(s->senseKey));
+    } else {
+        snprintf(buf, sizeof(buf), "OK (%llu bytes)", s->transferred);
+    }
+    return buf;
+}
+
+void WDScsiPrintError(const char *msg) {
+    fflush(stdout);   // keep ordering sane when stdout is piped/buffered
+    fprintf(stderr, "Error: %s — %s\n", msg, WDScsiLastErrorString());
+}
 
 #pragma mark - Transport
 
@@ -17,8 +87,15 @@ int WDExecSCSITaskReal(void *ctx,
                             UInt8 direction,
                             UInt32 timeout) {
     SCSITaskDeviceInterface **dev = (SCSITaskDeviceInterface **)ctx;
+
+    memset(&g_lastSense, 0, sizeof(g_lastSense));
+    g_lastSense.valid = YES;
+
     SCSITaskInterface **task = (*dev)->CreateSCSITask(dev);
-    if (!task) return -1;
+    if (!task) {
+        g_lastSense.ioReturn = kIOReturnNoResources;
+        return kWDScsiErrNoTask;
+    }
 
     IOVirtualRange range = { .address = (IOVirtualAddress)buffer, .length = bufferSize };
 
@@ -33,14 +110,21 @@ int WDExecSCSITaskReal(void *ctx,
     (*task)->SetTimeoutDuration(task, timeout);
 
     SCSI_Sense_Data sense = {0};
-    SCSITaskStatus status;
+    SCSITaskStatus status = 0;
     UInt64 transferred = 0;
     IOReturn result = (*task)->ExecuteTaskSync(task, &sense, &status, &transferred);
     (*task)->Release(task);
 
-    if (result != kIOReturnSuccess) return -2;
-    if (status != kSCSITaskStatus_GOOD) return -3;
-    return 0;
+    g_lastSense.ioReturn    = result;
+    g_lastSense.taskStatus  = (UInt8)status;
+    g_lastSense.senseKey    = sense.SENSE_KEY & 0x0F;
+    g_lastSense.asc         = sense.ADDITIONAL_SENSE_CODE;
+    g_lastSense.ascq        = sense.ADDITIONAL_SENSE_CODE_QUALIFIER;
+    g_lastSense.transferred = transferred;
+
+    if (result != kIOReturnSuccess) return kWDScsiErrTransport;
+    if (status != kSCSITaskStatus_GOOD) return kWDScsiErrCheck;
+    return kWDScsiOK;
 }
 
 /// Global SCSI execution function — points to real hardware by default.
@@ -57,7 +141,17 @@ int WDExecSCSITask(SCSITaskDeviceInterface **dev,
                         UInt8 direction,
                         UInt32 timeout) {
     void *ctx = g_scsiCtx ? g_scsiCtx : (void *)dev;
-    return g_scsiExec(ctx, cdb, cdbSize, buffer, bufferSize, direction, timeout);
+    int rc = g_scsiExec(ctx, cdb, cdbSize, buffer, bufferSize, direction, timeout);
+
+    if (g_verbose) {
+        fprintf(stderr, "[scsi] CDB:");
+        for (int i = 0; i < cdbSize; i++) fprintf(stderr, " %02X", cdb[i]);
+        fprintf(stderr, "  len=%u dir=%s  -> %s\n", bufferSize,
+                direction == kSCSIDataTransfer_FromTargetToInitiator ? "in" :
+                direction == kSCSIDataTransfer_FromInitiatorToTarget ? "out" : "none",
+                WDScsiLastErrorString());
+    }
+    return rc;
 }
 
 #pragma mark - Command Wrappers
@@ -179,5 +273,3 @@ int WDScsiWriteHandyStore(SCSITaskDeviceInterface **dev, UInt32 block, void *buf
     return WDExecSCSITask(dev, cdb, kSCSICDBSize_10Byte, buf, size,
                         kSCSIDataTransfer_FromInitiatorToTarget, 15000);
 }
-
-/// Cook a password: ensure Handy Store has valid security params, then hash.

@@ -41,6 +41,22 @@ enum {
     kTimeoutLong    = 300000,
 };
 
+/// Return codes from WDExecSCSITask and wrappers.
+enum {
+    kWDScsiOK            =  0,
+    kWDScsiErrNoTask     = -1,   ///< CreateSCSITask failed
+    kWDScsiErrTransport  = -2,   ///< IOKit returned an error (see g_lastSense.ioReturn)
+    kWDScsiErrCheck      = -3,   ///< Device returned non-GOOD status (see g_lastSense)
+};
+
+/// Process exit codes.
+enum {
+    kWDExitOK         = 0,
+    kWDExitFailure    = 1,   ///< Command failed (device error, etc.)
+    kWDExitUsage      = 2,   ///< Bad arguments
+    kWDExitNoDevice   = 3,   ///< No WD device found / could not open
+};
+
 // =============================================================================
 #pragma mark - Data Structures
 // =============================================================================
@@ -101,6 +117,18 @@ typedef struct {
     BOOL found;
 } WDDriveIdentity;
 
+/// Result of the most recent SCSI command (sense data, status, transfer length).
+/// Populated by WDExecSCSITaskReal (and by the test mock) on every call.
+typedef struct {
+    IOReturn ioReturn;      ///< kIOReturnSuccess unless transport failed
+    UInt8    taskStatus;    ///< SCSITaskStatus (0x00 GOOD, 0x02 CHECK CONDITION, ...)
+    UInt8    senseKey;      ///< Sense key (low nibble)
+    UInt8    asc;           ///< Additional sense code
+    UInt8    ascq;          ///< Additional sense code qualifier
+    UInt64   transferred;   ///< Bytes actually transferred
+    BOOL     valid;         ///< YES once any command has run
+} WDScsiSense;
+
 // =============================================================================
 #pragma mark - SCSI Abstraction Layer
 // =============================================================================
@@ -124,6 +152,23 @@ extern void *g_scsiCtx;
 /// Global drive identity provider — tests override to inject mock.
 extern WDDriveIdentityFn g_driveIdentity;
 
+/// Function pointer for locating the disk LUN's BSD name (e.g. "disk4").
+typedef NSString *(*WDDiskBSDNameFn)(void);
+
+/// Global BSD-name provider — tests override so no test ever touches diskutil.
+extern WDDiskBSDNameFn g_diskBSDName;
+
+/// Sense/status of the most recently executed SCSI command.
+extern WDScsiSense g_lastSense;
+
+/// When non-zero, every SCSI command logs its CDB and result to stderr.
+extern int g_verbose;
+
+/// Registry entry ID of the IOUSBMassStorageDriver that owns the currently
+/// opened SES device. Used to bind disk-LUN lookups (identity, BSD name) to
+/// the SAME enclosure selected with --disk. 0 = not bound (first match).
+extern uint64_t g_selectedEnclosureID;
+
 // =============================================================================
 #pragma mark - SCSI Functions
 // =============================================================================
@@ -144,6 +189,14 @@ int WDScsiInquiryVPD(SCSITaskDeviceInterface **dev, UInt8 page, void *buf, UInt3
 int WDScsiReadHandyStore(SCSITaskDeviceInterface **dev, UInt32 block, void *buf, UInt32 size);
 int WDScsiWriteHandyStore(SCSITaskDeviceInterface **dev, UInt32 block, void *buf, UInt32 size);
 
+/// Human-readable description of g_lastSense, e.g.
+/// "sense 05/20/00 (Illegal Request: Invalid command operation code)".
+/// Returns a pointer to a static buffer.
+const char *WDScsiLastErrorString(void);
+
+/// Print "Error: <msg> — <sense description>" to stderr.
+void WDScsiPrintError(const char *msg);
+
 // =============================================================================
 #pragma mark - Device Discovery
 // =============================================================================
@@ -151,7 +204,12 @@ int WDScsiWriteHandyStore(SCSITaskDeviceInterface **dev, UInt32 block, void *buf
 SCSITaskDeviceInterface **WDOpenDevice(char *nameOut, size_t nameSize, int deviceIndex);
 int WDListDevices(void);
 void WDCloseDevice(SCSITaskDeviceInterface **dev);
-NSString *WDFindDiskBSDName(void);
+NSString *WDFindDiskBSDNameFromIOKit(void);
+
+/// Returns the disk-LUN (Peripheral Device Type 0) IOSCSIPeripheralDeviceNub
+/// that shares an enclosure with g_selectedEnclosureID, or the first WD disk
+/// LUN if unbound. Caller must IOObjectRelease. Returns IO_OBJECT_NULL if none.
+io_service_t WDFindDiskLUNService(void);
 
 // =============================================================================
 #pragma mark - Helpers
@@ -164,22 +222,29 @@ const char *WDSelfTestResultString(UInt8 code);
 WDDriveIdentity WDDriveIdentityFromIOKit(const char *targetSerial);
 void WDPrintDriveIdentity(const char *targetSerial);
 
+/// Read a password: from `arg` if non-NULL, otherwise prompt on the terminal
+/// with echo disabled. Returns NULL on failure/empty. Writes into `out`.
+const char *WDReadPassword(const char *arg, const char *prompt, char *out, size_t outSize);
+
 // =============================================================================
 #pragma mark - Commands
 // =============================================================================
+//
+// Every command returns a kWDExit* code so main() can propagate it.
 
-void WDCmdSmart(SCSITaskDeviceInterface **dev);
-void WDCmdInfo(SCSITaskDeviceInterface **dev);
-void WDCmdShortTest(SCSITaskDeviceInterface **dev);
-void WDCmdLongTest(SCSITaskDeviceInterface **dev);
-void WDCmdAbortTest(SCSITaskDeviceInterface **dev);
-void WDCmdStatus(SCSITaskDeviceInterface **dev);
-void WDCmdTemp(SCSITaskDeviceInterface **dev);
-void WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue);
-void WDCmdPowerOff(SCSITaskDeviceInterface **dev);
-void WDCmdLED(SCSITaskDeviceInterface **dev, const char *setValue);
-void WDCmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]);
-void WDCmdSecureErase(int argc, const char *argv[]);
+int WDCmdSmart(SCSITaskDeviceInterface **dev);
+int WDCmdInfo(SCSITaskDeviceInterface **dev);
+int WDCmdShortTest(SCSITaskDeviceInterface **dev);
+int WDCmdLongTest(SCSITaskDeviceInterface **dev);
+int WDCmdAbortTest(SCSITaskDeviceInterface **dev);
+int WDCmdStatus(SCSITaskDeviceInterface **dev);
+int WDCmdTemp(SCSITaskDeviceInterface **dev);
+int WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue);
+int WDCmdPowerOff(SCSITaskDeviceInterface **dev);
+int WDCmdLED(SCSITaskDeviceInterface **dev, const char *setValue);
+int WDCmdProbe(SCSITaskDeviceInterface **dev);
+int WDCmdErase(SCSITaskDeviceInterface **dev, int argc, const char *argv[]);
+int WDCmdSecureErase(int argc, const char *argv[]);
 
 // =============================================================================
 #pragma mark - Encryption Commands
@@ -187,9 +252,9 @@ void WDCmdSecureErase(int argc, const char *argv[]);
 
 int WDCookPassword(SCSITaskDeviceInterface **dev, const char *password, UInt8 *cookedOut);
 int WDScsiEncryptLegacy(SCSITaskDeviceInterface **dev, UInt8 subCmd, UInt8 flag, UInt8 *cooked, int pwOffset);
-void WDCmdSetPassword(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset);
-void WDCmdUnlock(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset);
-void WDCmdRemovePassword(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset);
-void WDCmdResetDEK(SCSITaskDeviceInterface **dev, int argc, const char *argv[]);
+int WDCmdSetPassword(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset);
+int WDCmdUnlock(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset);
+int WDCmdRemovePassword(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset);
+int WDCmdResetDEK(SCSITaskDeviceInterface **dev, int argc, const char *argv[]);
 
 #endif /* WD_SMART_H */

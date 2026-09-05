@@ -1,5 +1,40 @@
 # Troubleshooting
 
+## First step: `probe` and `-v`
+
+```bash
+./wd_smart probe        # which commands does this bridge accept?
+./wd_smart -v <command> # print every CDB and its SCSI sense code
+```
+
+Every failure message now ends with the SCSI sense triple, e.g.
+`sense 05/20/00 (Illegal Request: Invalid command operation code (unsupported))`.
+The key ones:
+
+| Sense | Meaning | What to do |
+|-------|---------|-----------|
+| `05/20/00` | Opcode not supported by this bridge | Feature genuinely unavailable on this model |
+| `05/24/00` | Invalid field in CDB | Page not supported (e.g. VPD 0xB1 on Passport) |
+| `05/74/40` | WD: invalid data in page | Wrong password, or wrong page layout |
+| `04/44/81` | Bridge can't reach the SATA drive | See next section |
+
+## Everything fails with `sense 04/44/81 (Hardware Error)` — but `info` shows serial/capacity
+
+The bridge answers INQUIRY from its own firmware, but anything that has to
+talk to the HDD (SMART, encryption status, mode pages, Handy Store) returns
+*Internal Target Failure*. `diskutil list` shows no disk and `list` prints
+`(no disk)`. In the IOKit registry the LUN 0 nub has no `IOSCSIPeripheralDeviceType00`
+child and `IOServiceBusyTimeoutExtensions > 0` — the kernel timed out probing it.
+
+The drive inside the enclosure is not responding: not spinning, SATA link
+down, or the bridge is wedged.
+
+1. Unplug the drive, wait 10 seconds, plug it **directly** into the Mac (no hub, no dock)
+2. Bus-powered Passports need a full-power port; try another port or the supplied cable
+3. Quit WD Discovery / WD Security / WD Drive Utilities (`killall WDDriveUtilityHelper WDSecurityHelper`)
+4. Close browser tabs that have WebUSB permission (`ioreg -r -n "My Passport 0748" | grep IOUserClientCreator` shows who holds the device)
+5. If it persists across ports and cables, the HDD or bridge has failed
+
 ## "No WD device found or could not access it"
 
 ### Drive not detected
@@ -11,24 +46,21 @@
    ```bash
    ioreg -r -c IOSCSIPeripheralDeviceNub | grep -B2 -A2 "SES\|WD"
    ```
-3. Some newer WD drives may use a different vendor string. Check output above and update the vendor check in `wd_smart.m` if needed.
+3. Some newer WD drives may use a different vendor string. Check output above and update `isWDVendor()` in `src/WDDevice.m` if needed.
 
-### Cannot get exclusive access (0x2c7 or similar)
-The SCSI device is claimed by another process.
+### Cannot get exclusive access (0xe00002c5 / 0xe00002c7)
+The SES device is claimed by another process, or you lack permission.
 
 **Fix:**
-- Quit WD Drive Utilities if running
-- Kill the helper: `sudo killall WDDriveUtilityHelper`
-- Unmount the drive: `diskutil unmountDisk /dev/disk12`
+- Quit WD Discovery / WD Drive Utilities / WD Security
+- Kill the helpers: `killall WDDriveUtilityHelper WDSecurityHelper`
+- Retry with `sudo`
 
-After running the tool, remount:
-```bash
-diskutil mountDisk /dev/disk12
-```
+Unmounting the disk is **not** required — the SES LUN is independent of the mounted volume.
 
-## SMART status shows "CHECK" but attributes look fine
+## SMART status shows "UNKNOWN"
 
-Expected behavior. The SES page 0x84 status word (`0xC24F` etc.) uses a different encoding than ATA SMART's threshold-exceeded flag. If Reallocated Sectors, Pending Sectors, and Uncorrectable are all 0, the drive is healthy.
+Page 0x84 returned something other than the ATA pass (`C2 4F`) or fail (`2C F4`) signature. Run with `-v` to see the raw bytes. If Reallocated Sectors, Pending Sectors, and Uncorrectable are all 0, the drive is healthy.
 
 ## Self-test shows "In progress..." but I didn't start one
 
@@ -62,7 +94,9 @@ The LOG SENSE command for page 0x10 may not be supported on all WD bridge firmwa
 
 ## Sleep timer won't set
 
-Some WD enclosures restrict sleep timer values to specific presets (10, 15, 30, 45, 90 minutes). If an arbitrary value fails, try one of these standard values.
+- **Passport 0748**: MODE SELECT is rejected by the bridge entirely (`05/20/00`); read works, write doesn't.
+- **MyBook 25ED**: write works but `sleep 0` (disable) is rejected — the bridge enforces a minimum. Try `sleep 10`.
+- Some enclosures restrict values to presets (10, 15, 30, 45, 90 minutes).
 
 ## Temperature reads 0 or nonsensical value
 
@@ -80,20 +114,24 @@ Harmless if building without `-fobjc-arc`. The Makefile includes ARC by default.
 
 ## Permission errors
 
-Requires root:
-```bash
-sudo ./wd_smart
-```
+On current macOS the SES LUN's `SCSITaskUserClient` is available to admin users, so most commands work without `sudo`. `secure-erase` always needs root (it opens `/dev/rdiskN`); the tool checks and tells you.
 
-If sudo still fails, check that SIP isn't blocking IOKit user clients. This tool works with SIP enabled on macOS 12+.
+If `sudo` still fails with exclusive-access errors, another process holds the device (see above). This tool works with SIP enabled.
 
 ## Drive works in WD Drive Utilities but not here
 
 WD Drive Utilities uses a privileged helper (`WDDriveUtilityHelper`) that may hold exclusive access. Quit the app completely (check Activity Monitor for the helper process) before using this tool.
 
-## Only one WD drive detected (I have multiple)
+## Multiple WD drives
 
-The tool currently finds the first WD SES device. If you have multiple WD drives, you'd need to modify `findWDSESDevice()` to accept a serial number or BSD name filter. The IOKit properties include serial numbers for disambiguation.
+```bash
+./wd_smart list              # [0] My Passport 0748  /dev/disk4  WX61AA3J9126
+./wd_smart --disk 1 info
+```
+
+`--disk N` binds every command — including `erase` and `secure-erase` — to the
+enclosure whose SES device was opened, so the disk LUN is always the sibling of
+the selected SES LUN, never "the first WD disk IOKit happens to enumerate".
 
 ## Extended test taking forever
 
