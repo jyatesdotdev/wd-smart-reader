@@ -12,8 +12,8 @@ int g_verbose = 0;
 
 #pragma mark - Sense Decoding
 
-static const char *senseKeyName(UInt8 key) {
-    switch (key) {
+const char *WDScsiSenseKeyName(UInt8 key) {
+    switch (key & 0x0F) {
         case 0x0: return "No Sense";
         case 0x1: return "Recovered Error";
         case 0x2: return "Not Ready";
@@ -23,10 +23,16 @@ static const char *senseKeyName(UInt8 key) {
         case 0x6: return "Unit Attention";
         case 0x7: return "Data Protect";
         case 0x8: return "Blank Check";
+        case 0x9: return "Vendor Specific";
+        case 0xA: return "Copy Aborted";
         case 0xB: return "Aborted Command";
+        case 0xD: return "Volume Overflow";
+        case 0xE: return "Miscompare";
+        case 0xF: return "Completed";
         default:  return "Reserved";
     }
 }
+#define senseKeyName WDScsiSenseKeyName
 
 static const char *taskStatusName(UInt8 st) {
     switch (st) {
@@ -78,14 +84,19 @@ const char *WDScsiLastErrorString(void) {
     } else if (s->taskStatus != kSCSITaskStatus_GOOD) {
         const char *desc = ascName(s->asc, s->ascq);
         const char *st = taskStatusName(s->taskStatus);
+        // Append the raw status whenever it isn't the expected CHECK CONDITION,
+        // so an odd status paired with sense data is never hidden.
+        char stSuffix[32] = "";
+        if (s->taskStatus != kSCSITaskStatus_CHECK_CONDITION)
+            snprintf(stSuffix, sizeof(stSuffix), ", status %02X", s->taskStatus);
         if (s->senseKey == 0 && s->asc == 0 && s->ascq == 0)
             snprintf(buf, sizeof(buf), "SCSI status %02X (%s), no sense data", s->taskStatus, st);
         else if (desc)
-            snprintf(buf, sizeof(buf), "sense %02X/%02X/%02X (%s: %s)",
-                     s->senseKey, s->asc, s->ascq, senseKeyName(s->senseKey), desc);
+            snprintf(buf, sizeof(buf), "sense %02X/%02X/%02X (%s: %s%s)",
+                     s->senseKey, s->asc, s->ascq, senseKeyName(s->senseKey), desc, stSuffix);
         else
-            snprintf(buf, sizeof(buf), "sense %02X/%02X/%02X (%s, status %02X)",
-                     s->senseKey, s->asc, s->ascq, senseKeyName(s->senseKey), s->taskStatus);
+            snprintf(buf, sizeof(buf), "sense %02X/%02X/%02X (%s%s)",
+                     s->senseKey, s->asc, s->ascq, senseKeyName(s->senseKey), stSuffix);
     } else {
         snprintf(buf, sizeof(buf), "OK (%llu bytes)", s->transferred);
     }

@@ -13,13 +13,14 @@
 //
 
 #import "WDSmart.h"
+#import <DiskArbitration/DiskArbitration.h>
 
 uint64_t g_selectedEnclosureID = 0;
 
 #pragma mark - Registry Helpers
 
 /// Read a string property (searching parents), trimmed of whitespace. nil if absent.
-static NSString *regString(io_service_t s, CFStringRef key) {
+NSString *WDRegistryString(io_service_t s, CFStringRef key) {
     CFTypeRef ref = IORegistryEntrySearchCFProperty(
         s, kIOServicePlane, key, kCFAllocatorDefault,
         kIORegistryIterateRecursively | kIORegistryIterateParents);
@@ -28,6 +29,7 @@ static NSString *regString(io_service_t s, CFStringRef key) {
     NSString *str = (__bridge_transfer NSString *)ref;
     return [str stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 }
+#define regString WDRegistryString
 
 /// Read an integer property from the entry itself. -1 if absent.
 static int regInt(io_service_t s, CFStringRef key) {
@@ -45,7 +47,7 @@ static BOOL isWDVendor(NSString *vendor) {
 
 /// WD encodes the USB serial as hex ASCII ("5758..." == "WX..."). Decode when
 /// the whole string is even-length hex and decodes to printable ASCII.
-static NSString *decodeWDSerial(NSString *hex) {
+NSString *WDDecodeSerial(NSString *hex) {
     if (!hex || hex.length < 2 || (hex.length & 1)) return hex;
     NSMutableString *out = [NSMutableString stringWithCapacity:hex.length / 2];
     for (NSUInteger i = 0; i < hex.length; i += 2) {
@@ -56,6 +58,7 @@ static NSString *decodeWDSerial(NSString *hex) {
     }
     return out;
 }
+#define decodeWDSerial WDDecodeSerial
 
 /// Registry entry ID of the entry's parent in the service plane (the mass
 /// storage driver that owns both LUNs). 0 on failure.
@@ -192,7 +195,16 @@ SCSITaskDeviceInterface **WDOpenDevice(char *nameOut, size_t nameSize, int devic
             CFUUIDGetUUIDBytes(kIOSCSITaskDeviceInterfaceID), (LPVOID *)&dev);
         (*plugin)->Release(plugin);
 
-        if (!dev) continue;
+        if (!dev) {
+            // Never fall through to the NEXT enclosure when a specific one was
+            // requested — that would silently rebind a destructive command.
+            if (deviceIndex >= 0) {
+                fprintf(stderr, "Error: Could not query SCSI interface for --disk %d\n", deviceIndex);
+                IOObjectRelease(iter);
+                return NULL;
+            }
+            continue;
+        }
 
         // Obtain exclusive access (required for sending SCSI commands)
         kr = (*dev)->ObtainExclusiveAccess(dev);
@@ -288,6 +300,27 @@ void WDCloseDevice(SCSITaskDeviceInterface **dev) {
 }
 
 #pragma mark - Disk LUN BSD Name
+
+#pragma mark - Unmount
+
+BOOL WDUnmountDisk(NSString *bsdName) {
+    if (!bsdName) return NO;
+    DASessionRef session = DASessionCreate(kCFAllocatorDefault);
+    if (!session) return NO;
+    DASessionScheduleWithRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    NSString *path = [NSString stringWithFormat:@"/dev/%@", bsdName];
+    DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, [path UTF8String]);
+    BOOL issued = NO;
+    if (disk) {
+        DADiskUnmount(disk, kDADiskUnmountOptionWhole | kDADiskUnmountOptionForce, NULL, NULL);
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 2.0, false);
+        CFRelease(disk);
+        issued = YES;
+    }
+    DASessionUnscheduleFromRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    CFRelease(session);
+    return issued;
+}
 
 /// Find the BSD name (e.g. "disk12") of the bound WD disk LUN.
 NSString *WDFindDiskBSDNameFromIOKit(void) {

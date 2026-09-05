@@ -7,7 +7,7 @@
 ./wd_smart -v <command> # print every CDB and its SCSI sense code
 ```
 
-Every failure message now ends with the SCSI sense triple, e.g.
+Every SCSI-level failure message ends with the sense triple, e.g.
 `sense 05/20/00 (Illegal Request: Invalid command operation code (unsupported))`.
 The key ones:
 
@@ -96,7 +96,7 @@ If it still fails, the drive may need a full power cycle (eject + unplug + replu
 Use `caffeinate` to prevent sleep during long tests:
 ```bash
 caffeinate -s &
-sudo ./wd_smart long-test
+./wd_smart long-test
 ```
 Kill caffeinate when done: `killall caffeinate`
 
@@ -112,7 +112,7 @@ The LOG SENSE command for page 0x10 may not be supported on all WD bridge firmwa
 
 - **Writes do work on Passport 0748** — but the bridge returns a bogus status for MODE SELECT (`0x05`, `sense 02/04/01`, or `sense 04/00/00`) even though the change commits. The tool therefore verifies every write by reading the page back, so a successful change reports success. If you see "not applied", the read-back genuinely disagreed.
 - **MyBook 25ED**: `sleep 0` (disable) is rejected — the bridge enforces a minimum. Try `sleep 10`.
-- Some enclosures restrict values to presets (10, 15, 30, 45, 90 minutes).
+- Passport 0748 accepts arbitrary values (45, 20, 15, 30 all verified). If another enclosure rejects a value, try the WD Drive Utilities presets (10, 15, 30, 45, 90 minutes).
 
 ## Temperature reads 0 or nonsensical value
 
@@ -125,8 +125,6 @@ The diagnostic page 0x86 (temperature condition) isn't supported on all models. 
 xcode-select --install
 ```
 
-### Warnings about ARC bridge casts
-Harmless if building without `-fobjc-arc`. The Makefile includes ARC by default.
 
 ## Permission errors
 
@@ -151,7 +149,7 @@ the selected SES LUN, never "the first WD disk IOKit happens to enumerate".
 
 ## Extended test taking forever
 
-Normal for large drives. Rough estimate: ~1 hour per TB for a full surface scan. An 18TB drive may take 18-24+ hours. The drive remains usable during the test.
+Normal for large drives. Rough estimate: 1–1.5 hours per TB for a full surface scan; an 18TB drive takes 20–30+ hours. The drive remains usable during the test.
 
 ## macOS update broke the tool
 

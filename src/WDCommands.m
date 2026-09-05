@@ -8,7 +8,6 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <readpassphrase.h>
-#import <DiskArbitration/DiskArbitration.h>
 
 #pragma mark - SMART Attribute Name Lookup
 
@@ -137,12 +136,12 @@ const char *WDReadPassword(const char *arg, const char *prompt, char *out, size_
 #endif
 }
 
-/// Parse `--confirm` anywhere in argv (after the program name).
-static BOOL hasConfirmFlag(int argc, const char *argv[]) {
+BOOL WDHasConfirmFlag(int argc, const char *argv[]) {
     for (int i = 1; i < argc; i++)
-        if (strcmp(argv[i], "--confirm") == 0) return YES;
+        if (argv[i] && strcmp(argv[i], "--confirm") == 0) return YES;
     return NO;
 }
+#define hasConfirmFlag WDHasConfirmFlag
 
 
 #pragma mark - SMART Command
@@ -199,25 +198,12 @@ WDDriveIdentity WDDriveIdentityFromIOKit(const char *targetSerial) {
     io_service_t service = WDFindDiskLUNService();
     if (service == IO_OBJECT_NULL) return ident;
 
-    CFTypeRef vendorRef = IORegistryEntrySearchCFProperty(
-        service, kIOServicePlane, CFSTR("Vendor Identification"),
-        kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
-    CFTypeRef productRef = IORegistryEntrySearchCFProperty(
-        service, kIOServicePlane, CFSTR("Product Identification"),
-        kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
-    CFTypeRef revRef = IORegistryEntrySearchCFProperty(
-        service, kIOServicePlane, CFSTR("Product Revision Level"),
-        kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
-    CFTypeRef snRef = IORegistryEntrySearchCFProperty(
-        service, kIOServicePlane, CFSTR("USB Serial Number"),
-        kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+    // WDRegistryString type-checks (CFString only) and trims; never throws.
+    NSString *vendor   = WDRegistryString(service, CFSTR("Vendor Identification"));
+    NSString *product  = WDRegistryString(service, CFSTR("Product Identification"));
+    NSString *firmware = WDRegistryString(service, CFSTR("Product Revision Level"));
+    NSString *sn       = WDRegistryString(service, CFSTR("USB Serial Number"));
     IOObjectRelease(service);
-
-    NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
-    NSString *vendor   = vendorRef  ? [(__bridge_transfer NSString *)vendorRef  stringByTrimmingCharactersInSet:ws] : nil;
-    NSString *product  = productRef ? [(__bridge_transfer NSString *)productRef stringByTrimmingCharactersInSet:ws] : nil;
-    NSString *firmware = revRef     ? [(__bridge_transfer NSString *)revRef     stringByTrimmingCharactersInSet:ws] : nil;
-    NSString *sn       = snRef      ? (__bridge_transfer NSString *)snRef : nil;
 
     if (targetSerial) {
         NSString *t = @(targetSerial);
@@ -309,8 +295,10 @@ int WDCmdInfo(SCSITaskDeviceInterface **dev) {
         UInt32 blockSize = ((UInt32)cap[16] << 24) | ((UInt32)cap[17] << 16)
                          | ((UInt32)cap[18] << 8)  | cap[19];
 
-        double tb = (double)blocks * blockSize / 1e12;
-        printf("Capacity: %.2f TB (%llu blocks x %u bytes)\n", tb, blocks, blockSize);
+        if (blocks > 0 && blockSize > 0) {
+            double tb = (double)blocks * blockSize / 1e12;
+            printf("Capacity: %.2f TB (%llu blocks x %u bytes)\n", tb, blocks, blockSize);
+        }
 
         if (maxDisks > 1)
             printf("Bays:     %d/%d installed\n", installed, maxDisks);
@@ -555,30 +543,34 @@ int WDCmdSleep(SCSITaskDeviceInterface **dev, const char *setValue) {
     if (paramLen < 16) paramLen = 16;   // must include the timer bytes
 
     int rc = WDScsiModeSelect(dev, buf, paramLen, YES);
+    // Snapshot the MODE SELECT result now: the read-back below overwrites g_lastSense.
+    char selErr[256];
+    strlcpy(selErr, WDScsiLastErrorString(), sizeof(selErr));
 
     // The WD bridge frequently returns a bogus status for MODE SELECT even
     // though the write committed (observed on Passport 0748: status 0x05,
     // sense 02/04/01 and 04/00/00 on writes that all took effect).
-    // Trust the read-back, not the status.
+    // Trust the read-back, not the status. If we cannot read back, we cannot
+    // claim success.
     UInt8 verify[44] = {0};
-    if (WDScsiModeSense(dev, 0x1A, verify, sizeof(verify)) == 0) {
+    if (WDScsiModeSense(dev, 0x1A, verify, sizeof(verify)) == 0 && (verify[4] & 0x3F) == 0x1A) {
         UInt32 got = ((UInt32)verify[12] << 24) | ((UInt32)verify[13] << 16)
                    | ((UInt32)verify[14] << 8) | verify[15];
         if (got == timerVal) {
             if (minutes == 0) printf("Sleep timer disabled.\n");
             else              printf("Sleep timer set to %ld minutes.\n", minutes);
             if (rc != 0 && g_verbose)
-                fprintf(stderr, "[note] bridge reported failure but write committed\n");
+                fprintf(stderr, "[note] bridge reported failure (%s) but write committed\n", selErr);
             return kWDExitOK;
         }
+        fflush(stdout);
         fprintf(stderr, "Error: Sleep timer not applied (drive still reports %u seconds)\n", got / 10);
-    } else if (rc == 0) {
-        // Write claimed success but we cannot verify; report success.
-        printf("Sleep timer set to %ld minutes (unverified).\n", minutes);
-        return kWDExitOK;
+        if (rc != 0) fprintf(stderr, "  MODE SELECT: %s\n", selErr);
+    } else {
+        fflush(stdout);
+        fprintf(stderr, "Error: Could not verify sleep timer (read-back failed: %s)\n", WDScsiLastErrorString());
+        if (rc != 0) fprintf(stderr, "  MODE SELECT: %s\n", selErr);
     }
-
-    if (rc != 0) WDScsiPrintError("Could not set sleep timer");
     if (minutes == 0)
         fprintf(stderr, "  (Some bridges enforce a minimum and reject 0. Try 'sleep 10'.)\n");
     return kWDExitFailure;
@@ -613,6 +605,8 @@ int WDCmdLED(SCSITaskDeviceInterface **dev, const char *setValue) {
     buf[12] = on ? 0xFF : 0x00;
 
     int rc = WDScsiModeSelect(dev, buf, 16, YES);
+    char selErr[256];
+    strlcpy(selErr, WDScsiLastErrorString(), sizeof(selErr));
 
     // Same bridge quirk as the sleep timer: MODE SELECT often returns a bogus
     // status while the write actually commits. Verify by reading the page back.
@@ -621,16 +615,17 @@ int WDCmdLED(SCSITaskDeviceInterface **dev, const char *setValue) {
         if (!!verify[12] == !!on) {
             printf("LED turned %s.\n", on ? "on" : "off");
             if (rc != 0 && g_verbose)
-                fprintf(stderr, "[note] bridge reported failure but write committed\n");
+                fprintf(stderr, "[note] bridge reported failure (%s) but write committed\n", selErr);
             return kWDExitOK;
         }
+        fflush(stdout);
         fprintf(stderr, "Error: LED not applied (drive still reports %s)\n", verify[12] ? "on" : "off");
-    } else if (rc == 0) {
-        printf("LED turned %s (unverified).\n", on ? "on" : "off");
-        return kWDExitOK;
+        if (rc != 0) fprintf(stderr, "  MODE SELECT: %s\n", selErr);
+    } else {
+        fflush(stdout);
+        fprintf(stderr, "Error: Could not verify LED (read-back failed: %s)\n", WDScsiLastErrorString());
+        if (rc != 0) fprintf(stderr, "  MODE SELECT: %s\n", selErr);
     }
-
-    if (rc != 0) WDScsiPrintError("Could not set LED");
     return kWDExitFailure;
 }
 
@@ -655,13 +650,12 @@ static int probeOne(SCSITaskDeviceInterface **dev, const char *label,
         printf("\n");
     } else if (g_lastSense.ioReturn != kIOReturnSuccess) {
         printf("  %-34s IOKit error 0x%08x\n", label, g_lastSense.ioReturn);
+    } else if (g_lastSense.senseKey == 0 && g_lastSense.asc == 0 && g_lastSense.ascq == 0) {
+        printf("  %-34s SCSI status %02X, no sense\n", label, g_lastSense.taskStatus);
     } else {
         // Short form: key/asc/ascq + key name (the summary explains 04/44/81)
-        static const char *keys[] = {"No Sense","Recovered","Not Ready","Medium Error","Hardware Error",
-            "Illegal Request","Unit Attention","Data Protect","Blank Check","Vendor","Copy Aborted",
-            "Aborted Command","Equal","Volume Overflow","Miscompare","Completed"};
         printf("  %-34s sense %02X/%02X/%02X (%s)\n", label,
-               g_lastSense.senseKey, g_lastSense.asc, g_lastSense.ascq, keys[g_lastSense.senseKey & 0x0F]);
+               g_lastSense.senseKey, g_lastSense.asc, g_lastSense.ascq, WDScsiSenseKeyName(g_lastSense.senseKey));
     }
     return rc;
 }
@@ -684,7 +678,16 @@ int WDCmdProbe(SCSITaskDeviceInterface **dev) {
 
     printf("Standard SCSI:\n");
     PROBE("TEST UNIT READY",          NONE, 0,   0x00,0,0,0,0,0);
-    PROBE("INQUIRY",                  RX,   96,  0x12,0x00,0x00,0x00,96,0x00);
+    total++;
+    memset(buf, 0, sizeof(buf));
+    if (WDScsiInquiry(dev, buf, 96) == 0) {
+        ok++;
+        printf("  %-34s OK  [", "INQUIRY");
+        for (int i = 0; i < 16; i++) printf("%02X%s", buf[i], i < 15 ? " " : "");
+        printf(" …]\n");
+    } else {
+        printf("  %-34s %s\n", "INQUIRY", WDScsiLastErrorString());
+    }
     PROBE("INQUIRY VPD 0x00 (list)",  RX,   64,  0x12,0x01,0x00,0x00,64,0x00);
     // Decode supported VPD list
     if (buf[0] == 0x0D || buf[0] == 0x00) {
@@ -750,6 +753,18 @@ int WDCmdProbe(SCSITaskDeviceInterface **dev) {
 #pragma mark - Power and Erase
 
 int WDCmdPowerOff(SCSITaskDeviceInterface **dev) {
+    // Unmount first so macOS doesn't log "Disk Not Ejected Properly" and no
+    // dirty page-cache is lost. Best effort: a drive with no block device
+    // (locked / failed enumeration) simply has nothing to unmount.
+    NSString *bsd = g_diskBSDName();
+    if (bsd) {
+        printf("Unmounting /dev/%s...\n", [bsd UTF8String]);
+        fflush(stdout);
+#ifndef TESTING
+        WDUnmountDisk(bsd);
+#endif
+    }
+
     // WD power control via diagnostic page 0x80
     UInt8 page[8] = {0};
     page[0] = 0x80;   // page code
@@ -880,18 +895,8 @@ int WDCmdSecureErase(int argc, const char *argv[]) {
     }
 
     // Unmount all volumes using DiskArbitration
-    DASessionRef session = DASessionCreate(kCFAllocatorDefault);
-    if (!session) { fprintf(stderr, "Error: Could not create DA session\n"); return kWDExitFailure; }
-    DASessionScheduleWithRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-    DADiskRef daDisk = DADiskCreateFromBSDName(kCFAllocatorDefault, session,
-                                               [[NSString stringWithFormat:@"/dev/%@", bsdName] UTF8String]);
-    if (daDisk) {
-        DADiskUnmount(daDisk, kDADiskUnmountOptionWhole | kDADiskUnmountOptionForce, NULL, NULL);
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 2.0, false);
-        CFRelease(daDisk);
-    }
-    DASessionUnscheduleFromRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-    CFRelease(session);
+    if (!WDUnmountDisk(bsdName))
+        fprintf(stderr, "Warning: could not issue unmount; continuing\n");
 
     // Open raw character device for writing
     NSString *rawPath = [NSString stringWithFormat:@"/dev/r%@", bsdName];

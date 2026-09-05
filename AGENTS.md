@@ -16,8 +16,10 @@ macOS CLI tool that communicates with Western Digital external drives (MyBook, E
 
 ## Testing Rules
 
-- `make test` compiles `src/*.m` **directly with `-DTESTING`** into the test binary. Never link production `.o` files into tests — the `#ifdef TESTING` guards would be inert and `WDCmdErase(..., "--confirm")` would run real `diskutil eraseDisk`.
-- Tests override `g_scsiExec`, `g_driveIdentity`, and `g_diskBSDName`. Under TESTING, erase/secure-erase print `[TESTING] would run: …` instead of acting.
+- `make test` compiles the five library sources (`LIB_SRCS`; everything except `main.m`) **directly with `-DTESTING`** into the test binary. Never link production `.o` files into tests — the `#ifdef TESTING` guards would be inert and `WDCmdErase(..., "--confirm")` would run real `diskutil eraseDisk`. `nm wd_smart_tests | grep -c NSTask` must print 0.
+- Tests override `g_scsiExec`, `g_driveIdentity`, and `g_diskBSDName`. Under TESTING, erase prints `[TESTING] would run: diskutil …`, secure-erase prints `[TESTING] would zero-fill /dev/rdiskN`, power-off skips the real unmount, and `WDReadPassword` never prompts.
+- `make test-asan` runs the same suite under AddressSanitizer + UBSan; the bounds tests (VPD 0xC1, LOG SENSE, MODE SELECT clamps) only prove anything under ASan.
+- Argument parsing lives in `WDArgs.m` (`WDParseArgs`) precisely so it is unit-testable; `main.m` has no logic worth testing.
 - The mock supports fault injection: `g_mock.failAll = YES; failKey/ASC/ASCQ` — use it to reproduce field sense codes.
 
 ## Device Discovery
@@ -26,7 +28,7 @@ WD enclosures expose two SCSI LUNs on the same USB interface:
 - **LUN 0**: Disk (type 0) — claimed by `IOSCSIPeripheralDeviceType00` → `IOBlockStorageDriver`
 - **LUN 1**: SES (type 13) — has `SCSITaskUserClient` available for userspace access
 
-Filter: `IOServiceMatching("IOSCSIPeripheralDeviceNub")` → check `Vendor Identification` = "WD"/"WDC" and `Product Identification` contains "SES".
+Filter: `IOServiceMatching("IOSCSIPeripheralDeviceNub")` → `Vendor Identification` = "WD"/"WDC", then `Peripheral Device Type` == 13 **or** `Product Identification` contains "SES" (see `classifyNub()` in `WDDevice.m`).
 
 ## SCSI Commands Used
 
@@ -44,7 +46,10 @@ Filter: `IOServiceMatching("IOSCSIPeripheralDeviceNub")` → check `Vendor Ident
 | WD Encrypt Arm/Disarm | 0xC1 (sub 0xE2) | Set/remove password (legacy) |
 | WD Encrypt Unlock | 0xC1 (sub 0xE1) | Unlock locked drive (legacy) |
 | WD Encrypt Reset DEK | 0xC1 (sub 0xE3) | Reset encryption key (legacy) |
-| WD Encrypt (Optimus) | 0xB5 (sub 0xEF) | All encrypt ops (Optimus protocol) |
+| TEST UNIT READY | 0x00 | `probe` only |
+| WD Optimus probe | 0xA2 | `probe` only — rejected (05/20/00) on both tested bridges |
+
+Protocol reference only (documented from the decompile, **not sent by this tool**): WD Encrypt (Optimus) 0xB5 sub 0xEF.
 
 ## Diagnostic Pages (via RECEIVE DIAGNOSTIC 0x1C)
 
@@ -121,12 +126,12 @@ Returns `EncryptStatusReturnData` (up to 48 bytes):
 
 1. Read Handy Store block 1 (opcode 0xD8, block=1)
 2. Extract salt from offset 0x0C (UTF-16LE, typically "WDC." = `57 00 44 00 43 00 2E 00`)
-3. Read iterations from offset 0x08 (32-bit LE, default 1000)
+3. Read iterations from offset 0x08 (32-bit LE, default 1000) — **stored but not applied**; the hash is a single SHA-256, matching WD Drive Utilities. Do not "fix" this into PBKDF2.
 4. Concatenate: salt_bytes + password_as_UTF16LE
 5. SHA-256 hash → 32-byte cooked password
 
 **Important**: Before first use, the Handy Store block 1 must have:
-- Valid signature at bytes 0-3: `00 01 44 57`
+- Signature bytes 0-3 `00 01 44 57` (the tool checks bytes 2-3 = `44 57` and writes all four when initialising)
 - Iterations at bytes 8-11 (e.g., `E8 03 00 00` = 1000)
 - Valid checksum at byte 511: `-(sum of bytes 0-510) & 0xFF`
 
@@ -168,7 +173,7 @@ Page format:
 - Offset 0x08 or 0x28: 32-byte cooked password (offset depends on operation)
 
 Reset DEK page (for cipher 0x20/0x28): 0x28 bytes with cipher + 32 random bytes at offset 8.
-Reset DEK page (for cipher 0x30/0x31 or special PIDs): 0x08 bytes, no random.
+Reset DEK page for cipher 0x30/0x31: also 0x28 bytes, count 0, 32 **zero** bytes (see the layout table below — only cipher 0x01 uses an 8-byte page).
 
 **Critical**: Sense 05/74/40 means "invalid data in page" (wrong password offset or wrong password), NOT "command unsupported." The Optimus protocol (0xB5) is genuinely unsupported (05/20/00).
 
@@ -291,7 +296,7 @@ so `erase`/`secure-erase` remain unavailable until the drive is replugged. Replu
 | Sleep timer write | ✓ | ✓ | MODE SELECT page 0x1A — **verify by read-back, status is unreliable** |
 | LED control | ✓ | ? | MODE SENSE/SELECT page 0x21 — **verify by read-back** |
 | Power off | ✓ | ✓ | SEND DIAG page 0x80 |
-| Erase | ✓ | ? | Vendor 0xC4 |
+| Erase | ✓ (needs `/dev/diskN`) | ✓ (needs `/dev/diskN`) | `diskutil eraseDisk` — vendor 0xC4 is a no-op |
 | Optimus | ✗ | ✗ | Probe opcode 0xA2 |
 | VCD | ✗ | ? | MODE SENSE page 0x24 |
 
@@ -299,7 +304,8 @@ so `erase`/`secure-erase` remain unavailable until the drive is replugged. Replu
 
 ```bash
 make          # clang -fobjc-arc -Wall -Wextra; Foundation, IOKit, CoreFoundation, DiskArbitration
-make test     # 81 XCTests, ~10 ms, never touches hardware
+make test     # 123 XCTests, ~10 ms, never touches hardware
+make test-asan
 ./wd_smart [--disk N] [-v] <command>     # sudo only if exclusive access fails, or for secure-erase
 ```
 
@@ -320,3 +326,8 @@ make test     # 81 XCTests, ~10 ms, never touches hardware
 13. **MODE SELECT writes reported failure while succeeding** — the Passport bridge commits the write but returns a bogus status (`0x05`, `02/04/01`, `04/00/00`). `sleep`/`led` reported "Error: could not set" while the value changed. Now verified by reading the page back and comparing. This bug is also what produced the incorrect "sleep timer write rejected by bridge" note in this file.
 14. **Empty sense hid the real status** — when a command failed with no sense data the message said "No Sense", concealing the SCSI status byte. Now prints e.g. "SCSI status 05 (unknown), no sense data".
 15. **Device-open failures were opaque** — `0xe00002be` said nothing about who held the SES device. Now reads `IOUserClientCreator` and names the process (e.g. "pid 34000, WD Drive Utiliti").
+16. **`--disk N` after the command word was silently ignored** — `erase --confirm --disk 1` erased drive 0, and `unlock --disk 1` used "--disk" as the password. Parsing moved to `WDArgs.m`: options are recognised anywhere and destructive commands reject positional args.
+17. **`--disk N` could open the wrong enclosure** — if `QueryInterface` failed on device N, `WDOpenDevice` fell through to N+1. Now aborts.
+18. **MODE SELECT sense lost on read-back mismatch** — the error printed the read-back's "OK (44 bytes)" instead of the write's sense. Snapshotted before read-back.
+19. **"Unverified" writes exited 0** — when MODE SELECT said GOOD but the read-back failed, the tool claimed success. Now exit 1 ("could not verify").
+20. **power-off skipped unmount** — sent the power page with volumes mounted ("Disk Not Ejected Properly"). Now unmounts via DiskArbitration first.

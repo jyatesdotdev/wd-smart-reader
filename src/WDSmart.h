@@ -117,6 +117,52 @@ typedef struct {
     BOOL found;
 } WDDriveIdentity;
 
+// =============================================================================
+#pragma mark - Command Table and Argument Parsing (WDArgs.m)
+// =============================================================================
+
+typedef enum {
+    kWDCmdNoDevice,        ///< runs without opening the SES device (list)
+    kWDCmdDevice,          ///< needs the SES device
+    kWDCmdDeviceThenDisk,  ///< opens SES to bind the enclosure, releases it, then uses the disk LUN
+} WDCmdKind;
+
+typedef struct {
+    const char *name;
+    const char *args;       ///< argument synopsis for usage, or ""
+    const char *help;
+    WDCmdKind   kind;
+    BOOL        destructive;///< requires --confirm; accepts no positional args
+} WDCommandSpec;
+
+extern const WDCommandSpec kWDCommands[];
+extern const int kWDCommandCount;
+const WDCommandSpec *WDFindCommand(const char *name);
+
+enum { kWDMaxArgs = 16 };
+
+typedef enum {
+    kWDActionRun,
+    kWDActionHelp,
+    kWDActionUsageError,
+} WDParseAction;
+
+typedef struct {
+    WDParseAction action;
+    int   deviceIndex;              ///< -1 = first available
+    int   verbose;
+    int   confirm;
+    const char *cmdName;            ///< always set on kWDActionRun (defaults to "smart")
+    const WDCommandSpec *spec;      ///< resolved command, or NULL
+    const char *arg1;               ///< first positional arg, or NULL
+    const char *rest[kWDMaxArgs + 4]; ///< {prog, cmd, positional..., ["--confirm"], NULL}
+    int   restc;
+    char  error[160];               ///< set on kWDActionUsageError
+} WDParsedArgs;
+
+/// Parse argv. Options are accepted anywhere. Returns out->action.
+int WDParseArgs(int argc, const char *argv[], WDParsedArgs *out);
+
 /// Result of the most recent SCSI command (sense data, status, transfer length).
 /// Populated by WDExecSCSITaskReal (and by the test mock) on every call.
 typedef struct {
@@ -194,6 +240,9 @@ int WDScsiWriteHandyStore(SCSITaskDeviceInterface **dev, UInt32 block, void *buf
 /// Returns a pointer to a static buffer.
 const char *WDScsiLastErrorString(void);
 
+/// Sense key (0-15) to name, e.g. 0x05 -> "Illegal Request".
+const char *WDScsiSenseKeyName(UInt8 key);
+
 /// Print "Error: <msg> — <sense description>" to stderr.
 void WDScsiPrintError(const char *msg);
 
@@ -211,6 +260,19 @@ NSString *WDFindDiskBSDNameFromIOKit(void);
 /// LUN if unbound. Caller must IOObjectRelease. Returns IO_OBJECT_NULL if none.
 io_service_t WDFindDiskLUNService(void);
 
+/// Read a string registry property (searching parents), whitespace-trimmed.
+/// Returns nil if absent or not a CFString.
+NSString *WDRegistryString(io_service_t service, CFStringRef key);
+
+/// WD encodes the USB serial as hex ASCII ("5758..." == "WX..."). Returns the
+/// decoded string when the input is even-length hex that decodes to printable
+/// ASCII; otherwise returns the input unchanged.
+NSString *WDDecodeSerial(NSString *hex);
+
+/// Unmount every volume on /dev/<bsdName> via DiskArbitration (best effort).
+/// Returns YES if the request was issued.
+BOOL WDUnmountDisk(NSString *bsdName);
+
 // =============================================================================
 #pragma mark - Helpers
 // =============================================================================
@@ -225,6 +287,9 @@ void WDPrintDriveIdentity(const char *targetSerial);
 /// Read a password: from `arg` if non-NULL, otherwise prompt on the terminal
 /// with echo disabled. Returns NULL on failure/empty. Writes into `out`.
 const char *WDReadPassword(const char *arg, const char *prompt, char *out, size_t outSize);
+
+/// YES if "--confirm" appears anywhere in argv[1..].
+BOOL WDHasConfirmFlag(int argc, const char *argv[]);
 
 // =============================================================================
 #pragma mark - Commands

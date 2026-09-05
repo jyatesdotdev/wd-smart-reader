@@ -6,7 +6,7 @@ XCTEST_FLAGS = -framework XCTest \
   -rpath $(shell xcode-select -p)/Platforms/MacOSX.platform/Developer/Library/Frameworks
 
 TARGET = wd_smart
-LIB_SRCS = src/WDScsi.m src/WDDevice.m src/WDCommands.m src/WDEncryption.m
+LIB_SRCS = src/WDScsi.m src/WDDevice.m src/WDCommands.m src/WDEncryption.m src/WDArgs.m
 SRCS = $(LIB_SRCS) src/main.m
 OBJS = $(SRCS:.m=.o)
 
@@ -27,6 +27,14 @@ wd_smart_tests: $(LIB_SRCS) wd_smart_tests.m src/WDSmart.h
 test: wd_smart_tests
 	./wd_smart_tests
 
+# Same tests under AddressSanitizer + UBSan so over-reads in buffer parsers
+# actually fault instead of silently reading adjacent stack.
+test-asan: $(LIB_SRCS) wd_smart_tests.m src/WDSmart.h
+	$(CC) $(CFLAGS) -DTESTING=1 -fsanitize=address,undefined -fno-omit-frame-pointer -g \
+		$(FRAMEWORKS) $(XCTEST_FLAGS) -o wd_smart_tests_asan $(LIB_SRCS) wd_smart_tests.m
+	./wd_smart_tests_asan
+	@rm -f wd_smart_tests_asan
+
 coverage: $(LIB_SRCS) wd_smart_tests.m src/WDSmart.h
 	$(CC) $(CFLAGS) -DTESTING=1 $(FRAMEWORKS) $(XCTEST_FLAGS) -fprofile-instr-generate -fcoverage-mapping \
 		-o wd_smart_tests_cov $(LIB_SRCS) wd_smart_tests.m
@@ -36,9 +44,9 @@ coverage: $(LIB_SRCS) wd_smart_tests.m src/WDSmart.h
 	@rm -f wd_smart_tests_cov wd_smart.profraw wd_smart.profdata
 
 clean:
-	rm -f $(TARGET) $(OBJS) wd_smart_tests wd_smart_tests_cov wd_smart.profraw wd_smart.profdata probe probe_lun0
+	rm -rf $(TARGET) $(OBJS) wd_smart_tests wd_smart_tests_cov wd_smart_tests_asan *.dSYM wd_smart.profraw wd_smart.profdata
 
 install: $(TARGET)
 	cp $(TARGET) /usr/local/bin/
 
-.PHONY: all clean install test coverage
+.PHONY: all clean install test test-asan coverage

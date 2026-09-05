@@ -141,13 +141,20 @@ static const char *getPasswordArg(int argc, const char *argv[], int argOffset,
         fprintf(stderr, "Error: No password provided\n");
         return NULL;
     }
-    size_t n = strlen(pw);
+    // WD's 32 limit is in characters (UTF-16 units, matching what gets hashed),
+    // not bytes. Fall back to byte length if the string isn't valid UTF-8; the
+    // cooking step will reject it with a clearer message.
+    NSString *s = [NSString stringWithUTF8String:pw];
+    size_t n = s ? s.length : strlen(pw);
     if (n < 1 || n > 32) {
         fprintf(stderr, "Error: Password must be 1-32 characters\n");
         return NULL;
     }
     return pw;
 }
+
+/// Wipe password material from the stack before returning.
+static void scrub(void *p, size_t n) { memset_s(p, n, 0, n); }
 
 /// Set a password (arm encryption). Drive locks on next power cycle.
 int WDCmdSetPassword(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int argOffset) {
@@ -156,15 +163,18 @@ int WDCmdSetPassword(SCSITaskDeviceInterface **dev, int argc, const char *argv[]
     if (!password) return kWDExitUsage;
 
     UInt8 cooked[32] = {0};
-    if (WDCookPassword(dev, password, cooked) != 0) return kWDExitFailure;
-
-    if (WDScsiEncryptLegacy(dev, 0xE2, 0x01, cooked, 0x28) == 0) {
-        printf("Password set. Drive will lock on next power cycle.\n"
-               "Use 'unlock' to access after reconnecting.\n");
-        return kWDExitOK;
+    int rc = kWDExitFailure;
+    if (WDCookPassword(dev, password, cooked) == 0) {
+        if (WDScsiEncryptLegacy(dev, 0xE2, 0x01, cooked, 0x28) == 0) {
+            printf("Password set. Drive will lock on next power cycle.\n"
+                   "Use 'unlock' to access after reconnecting.\n");
+            rc = kWDExitOK;
+        } else {
+            printEncryptError("Could not set password");
+        }
     }
-    printEncryptError("Could not set password");
-    return kWDExitFailure;
+    scrub(cooked, sizeof(cooked)); scrub(pwBuf, sizeof(pwBuf));
+    return rc;
 }
 
 /// Unlock a locked drive with password.
@@ -174,14 +184,17 @@ int WDCmdUnlock(SCSITaskDeviceInterface **dev, int argc, const char *argv[], int
     if (!password) return kWDExitUsage;
 
     UInt8 cooked[32] = {0};
-    if (WDCookPassword(dev, password, cooked) != 0) return kWDExitFailure;
-
-    if (WDScsiEncryptLegacy(dev, 0xE1, 0x00, cooked, 0x08) == 0) {
-        printf("Drive unlocked.\n");
-        return kWDExitOK;
+    int rc = kWDExitFailure;
+    if (WDCookPassword(dev, password, cooked) == 0) {
+        if (WDScsiEncryptLegacy(dev, 0xE1, 0x00, cooked, 0x08) == 0) {
+            printf("Drive unlocked.\n");
+            rc = kWDExitOK;
+        } else {
+            printEncryptError("Unlock failed");
+        }
     }
-    printEncryptError("Unlock failed");
-    return kWDExitFailure;
+    scrub(cooked, sizeof(cooked)); scrub(pwBuf, sizeof(pwBuf));
+    return rc;
 }
 
 /// Remove password (disarm encryption). Requires current password.
@@ -191,14 +204,17 @@ int WDCmdRemovePassword(SCSITaskDeviceInterface **dev, int argc, const char *arg
     if (!password) return kWDExitUsage;
 
     UInt8 cooked[32] = {0};
-    if (WDCookPassword(dev, password, cooked) != 0) return kWDExitFailure;
-
-    if (WDScsiEncryptLegacy(dev, 0xE2, 0x10, cooked, 0x08) == 0) {
-        printf("Password removed. Encryption disabled.\n");
-        return kWDExitOK;
+    int rc = kWDExitFailure;
+    if (WDCookPassword(dev, password, cooked) == 0) {
+        if (WDScsiEncryptLegacy(dev, 0xE2, 0x10, cooked, 0x08) == 0) {
+            printf("Password removed. Encryption disabled.\n");
+            rc = kWDExitOK;
+        } else {
+            printEncryptError("Could not remove password");
+        }
     }
-    printEncryptError("Could not remove password");
-    return kWDExitFailure;
+    scrub(cooked, sizeof(cooked)); scrub(pwBuf, sizeof(pwBuf));
+    return rc;
 }
 
 /// Reset the Data Encryption Key. DESTROYS ALL DATA. Requires --confirm.
@@ -210,10 +226,7 @@ int WDCmdRemovePassword(SCSITaskDeviceInterface **dev, int argc, const char *arg
 ///   - cipher 0x30/0x31: count=0, zero seed,   len=0x28
 ///   - cipher 0x01:      len=0x08 (no seed)
 int WDCmdResetDEK(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
-    BOOL confirmed = NO;
-    for (int i = 1; i < argc; i++)
-        if (strcmp(argv[i], "--confirm") == 0) confirmed = YES;
-    if (!confirmed) {
+    if (!WDHasConfirmFlag(argc, argv)) {
         fprintf(stderr,
             "WARNING: reset-dek generates a new encryption key.\n"
             "         ALL DATA ON THE DRIVE WILL BE PERMANENTLY LOST.\n"
@@ -236,7 +249,7 @@ int WDCmdResetDEK(SCSITaskDeviceInterface **dev, int argc, const char *argv[]) {
     SCSICommandDescriptorBlock stcdb = {0};
     stcdb[0] = 0xC0; stcdb[1] = 0x45; stcdb[8] = 0x30;
     if (WDExecSCSITask(dev, stcdb, kSCSICDBSize_10Byte, stBuf, 48,
-                     kSCSIDataTransfer_FromTargetToInitiator, 10000) != 0 || stBuf[0] != 0x45) {
+                     kSCSIDataTransfer_FromTargetToInitiator, kTimeoutDefault) != 0 || stBuf[0] != 0x45) {
         WDScsiPrintError("Could not read encryption status");
         return kWDExitFailure;
     }

@@ -40,9 +40,21 @@ typedef struct {
     UInt8  failKey, failASC, failASCQ;
     // Bridge quirk: MODE SELECT commits the write but returns a bogus status
     BOOL   modeSelectLies;
-    UInt8  modeSelectStatus;
+    UInt8  modeSelectStatus;    // 0 -> treated as 0x02 (mock must never be incoherent)
     // Bridge genuinely ignores the write (page unchanged)
     BOOL   modeSelectIgnored;
+    // Read-back MODE SENSE fails after a MODE SELECT (exercises 'could not verify')
+    BOOL   modeSenseFailsAfterSelect;
+    BOOL   sawModeSelect;
+    // Diagnostic page 0x83 unsupported (forces the info encryption 'unavailable' path)
+    BOOL   diag83Unsupported;
+    // Diagnostic page 0x86 thermal supported
+    BOOL   thermalSupported;
+    UInt8  thermalPage[16];
+    // Diagnostic page 0x00 (supported list) and VPD 0x00 served when set
+    UInt8  diagPage00[64];
+    BOOL   failExceptInquiry;   // everything but opcode 0x12 fails with 05/20/00
+    WDDriveIdentity identity;   // returned by g_driveIdentity
     NSString *bsdName;          // what g_diskBSDName returns (nil = no disk)
 } MockDrive;
 
@@ -141,6 +153,20 @@ static void mockReset(void) {
     g_mock.ledSupported = YES;
     g_mock.ledPage[4] = 0x21; g_mock.ledPage[5] = 0x0A;
     g_mock.ledPage[12] = 0xFF;
+
+    // VPD 0x00 supported-page list (matches Passport 0748)
+    g_mock.vpdPages[0x00][0] = 0x0D; g_mock.vpdPages[0x00][3] = 5;
+    memcpy(&g_mock.vpdPages[0x00][4], (UInt8[]){0x00,0x80,0x83,0xC1,0xC2}, 5);
+
+    // Diag page 0x00 supported-page list (matches Passport 0748)
+    g_mock.diagPage00[0] = 0x00; g_mock.diagPage00[3] = 6;
+    memcpy(&g_mock.diagPage00[4], (UInt8[]){0x00,0x08,0x80,0x83,0x84,0x85}, 6);
+
+    // Default identity
+    strlcpy(g_mock.identity.vendor, "WD", sizeof(g_mock.identity.vendor));
+    strlcpy(g_mock.identity.product, "My Book 25ED", sizeof(g_mock.identity.product));
+    strlcpy(g_mock.identity.firmware, "1031", sizeof(g_mock.identity.firmware));
+    g_mock.identity.found = YES;
 }
 
 /// Fill g_lastSense as the real transport would, and return the matching rc.
@@ -174,8 +200,11 @@ static int mockExecSCSI(void *ctx,
     }
 
     if (g_mock.failAll) return mockFail(g_mock.failKey, g_mock.failASC, g_mock.failASCQ);
+    if (g_mock.failExceptInquiry && cdb[0] != 0x12) return mockFail(0x05, 0x20, 0x00);
 
     switch (cdb[0]) {
+        case 0x00: // TEST UNIT READY
+            return 0;
         case 0xD8: { // Read Handy Store
             UInt32 block = ((UInt32)cdb[2]<<24)|((UInt32)cdb[3]<<16)|((UInt32)cdb[4]<<8)|cdb[5];
             if (block == 1 && buffer) memcpy(buffer, g_mock.handyStore, 512);
@@ -223,14 +252,21 @@ static int mockExecSCSI(void *ctx,
         }
         case 0x1C: { // RECEIVE DIAGNOSTIC
             UInt8 page = cdb[2];
-            if (page == 0x84 && buffer)
+            if (page == 0x00 && buffer)
+                memcpy(buffer, g_mock.diagPage00, bufferSize < 64 ? bufferSize : 64);
+            else if (page == 0x83 && g_mock.diag83Unsupported)
+                return mockFail(0x05, 0x24, 0x00);
+            else if (page == 0x84 && buffer)
                 memcpy(buffer, g_mock.smartStatus, bufferSize < 8 ? bufferSize : 8);
             else if (page == 0x85 && buffer)
                 memcpy(buffer, g_mock.smartData, bufferSize < 520 ? bufferSize : 520);
             else if (page == 0x86 && buffer) {
-                // Temperature page — unsupported on Passport/MyBook; test fallback
-                memset(buffer, 0, bufferSize);
-                return mockFail(0x05, 0x24, 0x00);
+                if (!g_mock.thermalSupported) {
+                    // Unsupported on Passport/MyBook; tests the SMART-194 fallback
+                    memset(buffer, 0, bufferSize);
+                    return mockFail(0x05, 0x24, 0x00);
+                }
+                memcpy(buffer, g_mock.thermalPage, bufferSize < 16 ? bufferSize : 16);
             }
             return 0;
         }
@@ -250,6 +286,8 @@ static int mockExecSCSI(void *ctx,
         }
         case 0x1A: { // MODE SENSE
             UInt8 page = cdb[2] & 0x3F;
+            if (g_mock.modeSenseFailsAfterSelect && g_mock.sawModeSelect)
+                return mockFail(0x05, 0x24, 0x00);
             if (page == 0x21) {
                 if (!g_mock.ledSupported) return mockFail(0x05, 0x24, 0x00);
                 if (buffer) memcpy(buffer, g_mock.ledPage, bufferSize < 16 ? bufferSize : 16);
@@ -260,6 +298,7 @@ static int mockExecSCSI(void *ctx,
         }
         case 0x15: { // MODE SELECT
             UInt8 *p = (UInt8 *)buffer;
+            g_mock.sawModeSelect = YES;
             if (!g_mock.modeSelectIgnored) {
                 if (buffer && (p[4] & 0x3F) == 0x21) {
                     memcpy(g_mock.ledPage, buffer, bufferSize < 16 ? bufferSize : 16);
@@ -270,16 +309,15 @@ static int mockExecSCSI(void *ctx,
             }
             // Write committed either way; optionally report a bogus failure
             if (g_mock.modeSelectLies) {
-                g_lastSense.taskStatus = g_mock.modeSelectStatus;
-                if (g_mock.modeSelectStatus == 0x02) {
+                UInt8 st = g_mock.modeSelectStatus ? g_mock.modeSelectStatus : 0x02;
+                g_lastSense.taskStatus = st;
+                if (st == 0x02) {
                     g_lastSense.senseKey = 0x02; g_lastSense.asc = 0x04; g_lastSense.ascq = 0x01;
                 }
                 return kWDScsiErrCheck;
             }
             return 0;
         }
-        case 0xC4: // FORMAT DISK (erase)
-            return 0;
         default:
             return mockFail(0x05, 0x20, 0x00);
     }
@@ -296,6 +334,15 @@ static void installMock(void) {
     g_driveIdentity = mockDriveIdentity;
     g_diskBSDName = mockDiskBSDName;
     g_verbose = 0;
+    memset(&g_lastSense, 0, sizeof(g_lastSense));   // deterministic start
+}
+
+/// First recorded command matching opcode (and optional subcode), or NULL.
+static MockSCSIRecord *findRecord(UInt8 opcode, int subcode) {
+    for (int i = 0; i < g_mock.recordCount; i++)
+        if (g_mock.records[i].opcode == opcode && (subcode < 0 || g_mock.records[i].subcode == subcode))
+            return &g_mock.records[i];
+    return NULL;
 }
 
 static void uninstallMock(void) {
@@ -306,28 +353,32 @@ static void uninstallMock(void) {
 }
 
 /// Capture stdout (and optionally stderr) produced by `block`.
+/// Uses a growing memory stream (no silent truncation) and always restores the
+/// real streams even if the block throws — otherwise every later test would
+/// write into a dead buffer.
 static NSString *captureOutput(BOOL alsoStderr, void (^block)(void)) {
-    char outBuf[8192] = {0};
+    char *buf = NULL; size_t len = 0;
     fflush(stdout); fflush(stderr);
     FILE *oldOut = stdout, *oldErr = stderr;
-    FILE *mem = fmemopen(outBuf, sizeof(outBuf) - 1, "w");
+    FILE *mem = open_memstream(&buf, &len);
+    NSCAssert(mem, @"open_memstream failed");
     stdout = mem;
     if (alsoStderr) stderr = mem;
-    block();
-    fflush(mem);
-    stdout = oldOut; stderr = oldErr;
-    fclose(mem);
-    return [NSString stringWithUTF8String:outBuf] ?: @"";
+    @try {
+        block();
+    } @finally {
+        fflush(mem);
+        stdout = oldOut; stderr = oldErr;
+        fclose(mem);
+    }
+    NSString *s = buf ? ([NSString stringWithUTF8String:buf] ?: @"") : @"";
+    free(buf);
+    return s;
 }
 
 static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     (void)targetSerial;
-    WDDriveIdentity ident = {0};
-    strlcpy(ident.vendor, "WD", sizeof(ident.vendor));
-    strlcpy(ident.product, "My Book 25ED", sizeof(ident.product));
-    strlcpy(ident.firmware, "1031", sizeof(ident.firmware));
-    ident.found = YES;
-    return ident;
+    return g_mock.identity;   // per-test overridable; seeded in mockReset
 }
 
 // =============================================================================
@@ -408,11 +459,14 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testSetPasswordFailsWhenAlreadyArmed {
     const char *argv[] = {"wd_smart", "set-password", "first"};
-    WDCmdSetPassword(NULL, 3, argv, 1);
+    XCTAssertEqual(WDCmdSetPassword(NULL, 3, argv, 1), kWDExitOK);
+    UInt8 firstCooked[32]; memcpy(firstCooked, g_mock.cookedPassword, 32);
+
     const char *argv2[] = {"wd_smart", "set-password", "second"};
-    WDCmdSetPassword(NULL, 3, argv2, 1);
-    // First password should still be active
+    XCTAssertEqual(WDCmdSetPassword(NULL, 3, argv2, 1), kWDExitFailure, @"second arm must be rejected");
+    // First password should still be active and unchanged
     XCTAssertEqual(g_mock.securityState, 0x02);
+    XCTAssertEqual(memcmp(firstCooked, g_mock.cookedPassword, 32), 0);
 }
 
 // MARK: - Unlock
@@ -452,8 +506,9 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testUnlockFailsWhenNotLocked {
     const char *argv[] = {"wd_smart", "unlock", "x"};
-    WDCmdUnlock(NULL, 3, argv, 1);
+    XCTAssertEqual(WDCmdUnlock(NULL, 3, argv, 1), kWDExitFailure);
     XCTAssertEqual(g_mock.securityState, 0x00);
+    XCTAssert(findRecord(0xC1, 0xE1) != NULL, @"unlock command must have been sent");
 }
 
 // MARK: - Remove Password
@@ -584,140 +639,104 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 // MARK: - SMART Command
 
 - (void)testCmdSmartDisplaysAttributes {
-    // Redirect stdout to capture output
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-
-    WDCmdSmart(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
-
-    XCTAssert(strstr(outBuf, "PASSED") != NULL, @"Should show SMART PASSED");
-    XCTAssert(strstr(outBuf, "Temperature") != NULL, @"Should show temp attribute");
-    XCTAssert(strstr(outBuf, "Power-On Hours") != NULL, @"Should show POH");
-    XCTAssert(strstr(outBuf, "Reallocated") != NULL, @"Should show reallocated");
+    NSString *out = captureOutput(NO, ^{ WDCmdSmart(NULL); });
+    XCTAssert([out containsString:@"PASSED"], @"Should show SMART PASSED");
+    XCTAssert([out containsString:@"Temperature"], @"Should show temp attribute");
+    XCTAssert([out containsString:@"Power-On Hours"], @"Should show POH");
+    XCTAssert([out containsString:@"Reallocated"], @"Should show reallocated");
 }
 
 - (void)testCmdSmartShowsFailed {
     g_mock.smartStatus[5] = 0x2C; g_mock.smartStatus[6] = 0xF4; // FAIL
 
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdSmart(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdSmart(NULL); });
 
-    XCTAssert(strstr(outBuf, "FAILED") != NULL);
+    XCTAssert([out containsString:@"FAILED"]);
 }
 
 // MARK: - Status Command (Self-Test Log)
 
 - (void)testCmdStatusShowsResults {
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdStatus(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdStatus(NULL); });
 
-    XCTAssert(strstr(outBuf, "Short") != NULL, @"Should show test type");
-    XCTAssert(strstr(outBuf, "Completed OK") != NULL, @"Should show result");
+    XCTAssert([out containsString:@"Short"], @"Should show test type");
+    XCTAssert([out containsString:@"Completed OK"], @"Should show result");
 }
 
 - (void)testCmdStatusEmptyLog {
     g_mock.selfTestLog[2] = 0; g_mock.selfTestLog[3] = 0; // pageLen=0
 
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdStatus(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdStatus(NULL); });
 
-    XCTAssert(strstr(outBuf, "No self-test results") != NULL);
+    XCTAssert([out containsString:@"No self-test results"]);
 }
 
 // MARK: - Temperature Command
 
 - (void)testCmdTempShowsTemperature {
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdTemp(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdTemp(NULL); });
 
-    XCTAssert(strstr(outBuf, "35") != NULL, @"Should show 35°C from attr 194");
+    XCTAssert([out containsString:@"35"], @"Should show 35°C from attr 194");
 }
 
 - (void)testCmdTempWithThermalPage {
-    // Make page 0x86 succeed by patching mock — we need to change the mock behavior
-    // For this test, put temp data directly in SMART attr and verify fallback works
-    // (page 0x86 fails in mock, so cmdTemp falls through to SMART attr 194)
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdTemp(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    // Bridge that supports diag page 0x86: thermal condition + fan data + SMART temp
+    g_mock.thermalSupported = YES;
+    g_mock.thermalPage[0] = 0x86;
+    g_mock.thermalPage[4] = 0x01;                 // condition = Warm
+    g_mock.thermalPage[6] = 0x05; g_mock.thermalPage[7] = 0xDC;   // fan 1500 rpm (BE)
+    g_mock.thermalPage[8] = 0x00; g_mock.thermalPage[9] = 0x64;   // goal PWM 100
+    g_mock.thermalPage[10] = 0x00; g_mock.thermalPage[11] = 0x50; // current PWM 80
+    NSString *out = captureOutput(NO, ^{ XCTAssertEqual(WDCmdTemp(NULL), kWDExitOK); });
+    XCTAssert([out containsString:@"Thermal:  Warm"], @"%@", out);
+    XCTAssert([out containsString:@"Fan RPM:  1500"], @"%@", out);
+    XCTAssert([out containsString:@"Fan PWM:  80 / 100"], @"%@", out);
+    XCTAssert([out containsString:@"Drive:    35°C"], @"%@", out);
+}
 
-    XCTAssert(strstr(outBuf, "35") != NULL);
+- (void)testCmdTempThermalPageOnlyWhenSmartFails {
+    // 0x86 works but SMART data is unavailable: still OK because we got something
+    g_mock.thermalSupported = YES;
+    g_mock.thermalPage[4] = 0x00;
+    g_mock.smartData[0] = 0; // keep GOOD status but make attribute scan find nothing
+    memset(&g_mock.smartData[10], 0, 360);
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdTemp(NULL), kWDExitOK); });
+    XCTAssert([out containsString:@"Thermal:  Normal"], @"%@", out);
+    XCTAssertFalse([out containsString:@"Drive:"]);
 }
 
 // MARK: - Sleep Timer Command
 
 - (void)testCmdSleepReadsTimer {
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdSleep(NULL, NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdSleep(NULL, NULL); });
 
-    XCTAssert(strstr(outBuf, "10 minutes") != NULL, @"Should show 10 min timer");
+    XCTAssert([out containsString:@"10 minutes"], @"Should show 10 min timer");
 }
 
 - (void)testCmdSleepDisabled {
     // Set timer to 0
     g_mock.modePage[7] = 0; g_mock.modePage[14] = 0; g_mock.modePage[15] = 0;
 
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdSleep(NULL, NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdSleep(NULL, NULL); });
 
-    XCTAssert(strstr(outBuf, "disabled") != NULL);
+    XCTAssert([out containsString:@"disabled"]);
 }
 
 - (void)testCmdSleepSetsTimer {
     g_mock.recordCount = 0;
 
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdSleep(NULL, "20");
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdSleep(NULL, "20"); });
 
-    XCTAssert(strstr(outBuf, "20 minutes") != NULL);
+    XCTAssert([out containsString:@"20 minutes"]);
     // Verify mode page was written with correct timer value (20*600=12000=0x2EE0)
     UInt32 written = ((UInt32)g_mock.modePage[12]<<24) | ((UInt32)g_mock.modePage[13]<<16) | ((UInt32)g_mock.modePage[14]<<8) | g_mock.modePage[15];
     XCTAssertEqual(written, (UInt32)(20 * 600));
 }
 
 - (void)testCmdSleepDisablesWithZero {
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdSleep(NULL, "0");
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdSleep(NULL, "0"); });
 
-    XCTAssert(strstr(outBuf, "disabled") != NULL);
+    XCTAssert([out containsString:@"disabled"]);
     UInt32 written = ((UInt32)g_mock.modePage[12]<<24) | ((UInt32)g_mock.modePage[13]<<16) | ((UInt32)g_mock.modePage[14]<<8) | g_mock.modePage[15];
     XCTAssertEqual(written, (UInt32)0);
 }
@@ -727,14 +746,9 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 - (void)testCmdShortTestSendsDiagnostic {
     g_mock.recordCount = 0;
 
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdShortTest(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdShortTest(NULL); });
 
-    XCTAssert(strstr(outBuf, "Short self-test started") != NULL);
+    XCTAssert([out containsString:@"Short self-test started"]);
     // Verify SEND DIAGNOSTIC was sent
     BOOL found = NO;
     for (int i = 0; i < g_mock.recordCount; i++)
@@ -744,28 +758,28 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 
 - (void)testCmdLongTestSendsDiagnostic {
     g_mock.recordCount = 0;
+    NSString *out = captureOutput(NO, ^{ XCTAssertEqual(WDCmdLongTest(NULL), kWDExitOK); });
+    XCTAssert([out containsString:@"Extended self-test started"]);
+    MockSCSIRecord *r = findRecord(0x1D, -1);
+    XCTAssert(r != NULL);
+    XCTAssertEqual(r->cdb[1], 0x40, @"extended test code 2 in bits 7:5, no SelfTest bit");
+}
 
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdLongTest(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
-
-    XCTAssert(strstr(outBuf, "Extended self-test started") != NULL);
+- (void)testCmdShortTestCDB {
+    g_mock.recordCount = 0;
+    WDCmdShortTest(NULL);
+    MockSCSIRecord *r = findRecord(0x1D, -1);
+    XCTAssert(r != NULL);
+    XCTAssertEqual(r->cdb[1], 0x20, @"short test code 1 in bits 7:5");
 }
 
 - (void)testCmdAbortTestSendsDiagnostic {
     g_mock.recordCount = 0;
-
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdAbortTest(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
-
-    XCTAssert(strstr(outBuf, "aborted") != NULL);
+    NSString *out = captureOutput(NO, ^{ XCTAssertEqual(WDCmdAbortTest(NULL), kWDExitOK); });
+    XCTAssert([out containsString:@"aborted"]);
+    MockSCSIRecord *r = findRecord(0x1D, -1);
+    XCTAssert(r != NULL);
+    XCTAssertEqual(r->cdb[1], 0x80, @"abort code 4 in bits 7:5");
 }
 
 // MARK: - Power Off
@@ -773,32 +787,34 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 - (void)testCmdPowerOffSendsPage {
     g_mock.recordCount = 0;
 
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdPowerOff(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ XCTAssertEqual(WDCmdPowerOff(NULL), kWDExitOK); });
 
-    XCTAssert(strstr(outBuf, "powered off") != NULL);
-    // Should have sent SEND DIAGNOSTIC with page 0x80
-    BOOL found = NO;
-    for (int i = 0; i < g_mock.recordCount; i++)
-        if (g_mock.records[i].opcode == 0x1D) found = YES;
-    XCTAssertTrue(found);
+    XCTAssert([out containsString:@"powered off"]);
+    // Should have sent SEND DIAGNOSTIC (PF bit) carrying page 0x80 with PowerOff bit
+    MockSCSIRecord *r = findRecord(0x1D, -1);
+    XCTAssert(r != NULL);
+    XCTAssertEqual(r->cdb[1], 0x10, @"PF bit");
+    XCTAssertEqual(r->data[0], 0x80, @"page code");
+    XCTAssertEqual(r->data[3], 0x04, @"page length");
+    XCTAssertEqual(r->data[4], 0x01, @"PowerOff bit");
+}
+
+- (void)testCmdPowerOffAnnouncesUnmountWhenDiskPresent {
+    g_mock.bsdName = @"disk7";
+    NSString *out = captureOutput(NO, ^{ WDCmdPowerOff(NULL); });
+    XCTAssert([out containsString:@"Unmounting /dev/disk7"], @"%@", out);
 }
 
 // MARK: - Erase
 
 - (void)testCmdEraseRequiresConfirm {
-    const char *argv[] = {"wd_smart", "erase"};
+    static const char *argv[] = {"wd_smart", "erase"};
+    g_mock.bsdName = @"disk99";   // a disk IS present; only --confirm is missing
     g_mock.recordCount = 0;
-    WDCmdErase(NULL, 2, argv);
-    // Should NOT have sent format command
-    BOOL found = NO;
-    for (int i = 0; i < g_mock.recordCount; i++)
-        if (g_mock.records[i].opcode == 0xC4) found = YES;
-    XCTAssertFalse(found);
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdErase(NULL, 2, argv), kWDExitUsage); });
+    XCTAssertEqual(g_mock.recordCount, 0, @"must send nothing without --confirm");
+    XCTAssert([out containsString:@"erase --confirm"], @"must tell the user how to proceed");
+    XCTAssertFalse([out containsString:@"would run"], @"must not reach the erase step");
 }
 
 - (void)testCmdEraseWithConfirmNoDisk {
@@ -816,7 +832,40 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdErase(NULL, 3, argv), kWDExitOK); });
     XCTAssert([out containsString:@"[TESTING] would run"]);
     XCTAssert([out containsString:@"/dev/disk99"]);
-    XCTAssert([out containsString:@"\"My Book\""], @"label derived from product, got: %@", out);
+    XCTAssert([out containsString:@"\"My Book\""], @"label = product minus model suffix, got: %@", out);
+}
+
+- (void)testEraseLabelFromSingleWordProduct {
+    g_mock.bsdName = @"disk99";
+    strlcpy(g_mock.identity.product, "Elements", sizeof(g_mock.identity.product));
+    static const char *argv[] = {"wd_smart", "erase", "--confirm"};
+    NSString *out = captureOutput(YES, ^{ WDCmdErase(NULL, 3, argv); });
+    XCTAssert([out containsString:@"\"Elements\""], @"%@", out);
+}
+
+- (void)testEraseLabelFallsBackWhenIdentityUnknown {
+    g_mock.bsdName = @"disk99";
+    g_mock.identity.found = NO;
+    static const char *argv[] = {"wd_smart", "erase", "--confirm"};
+    NSString *out = captureOutput(YES, ^{ WDCmdErase(NULL, 3, argv); });
+    XCTAssert([out containsString:@"\"WD Drive\""], @"%@", out);
+}
+
+- (void)testConfirmFlagAnywhereAfterCommand {
+    g_mock.bsdName = @"disk99";
+    static const char *argv[] = {"wd_smart", "erase", "x", "--confirm"};
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdErase(NULL, 4, argv), kWDExitOK); });
+    XCTAssert([out containsString:@"would run"]);
+}
+
+- (void)testConfirmFlagIsExactMatch {
+    g_mock.bsdName = @"disk99";
+    static const char *a1[] = {"wd_smart", "erase", "--CONFIRM"};
+    static const char *a2[] = {"wd_smart", "erase", "--confirm=1"};
+    XCTAssertEqual(WDCmdErase(NULL, 3, a1), kWDExitUsage);
+    XCTAssertEqual(WDCmdErase(NULL, 3, a2), kWDExitUsage);
+    XCTAssertFalse(WDHasConfirmFlag(3, a1));
+    XCTAssertFalse(WDHasConfirmFlag(3, a2));
 }
 
 - (void)testCmdEraseRequiresConfirmReturnsUsage {
@@ -827,78 +876,48 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 // MARK: - Info Command (VPD parsing)
 
 - (void)testPrintDriveIdentity {
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDPrintDriveIdentity(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDPrintDriveIdentity(NULL); });
 
-    XCTAssert(strstr(outBuf, "WD") != NULL, @"Should show vendor");
-    XCTAssert(strstr(outBuf, "My Book 25ED") != NULL, @"Should show product");
-    XCTAssert(strstr(outBuf, "1031") != NULL, @"Should show firmware");
+    XCTAssert([out containsString:@"WD"], @"Should show vendor");
+    XCTAssert([out containsString:@"My Book 25ED"], @"Should show product");
+    XCTAssert([out containsString:@"1031"], @"Should show firmware");
 }
 
 - (void)testCmdInfoShowsFullOutput {
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdInfo(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdInfo(NULL); });
 
-    XCTAssert(strstr(outBuf, "My Book 25ED") != NULL, @"Should show product from identity");
-    XCTAssert(strstr(outBuf, "ABC12345") != NULL, @"Should show serial");
-    XCTAssert(strstr(outBuf, "7200") != NULL, @"Should show RPM");
-    XCTAssert(strstr(outBuf, "Off") != NULL, @"Should show encrypt Off");
-    XCTAssert(strstr(outBuf, "Full Disk") != NULL, @"Should show cipher");
-    XCTAssert(strstr(outBuf, "USB3.0") != NULL, @"Should show port");
+    XCTAssert([out containsString:@"My Book 25ED"], @"Should show product from identity");
+    XCTAssert([out containsString:@"ABC12345"], @"Should show serial");
+    XCTAssert([out containsString:@"7200"], @"Should show RPM");
+    XCTAssert([out containsString:@"Off"], @"Should show encrypt Off");
+    XCTAssert([out containsString:@"Full Disk"], @"Should show cipher");
+    XCTAssert([out containsString:@"USB3.0"], @"Should show port");
 }
 
 - (void)testCmdInfoShowsLockedState {
     g_mock.securityState = 0x01;
 
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdInfo(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdInfo(NULL); });
 
-    XCTAssert(strstr(outBuf, "Locked") != NULL);
+    XCTAssert([out containsString:@"Locked"]);
 }
 
 - (void)testCmdInfoShowsFormFactor {
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdInfo(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdInfo(NULL); });
 
-    XCTAssert(strstr(outBuf, "3.5") != NULL, @"Should show form factor");
+    XCTAssert([out containsString:@"3.5"], @"Should show form factor");
 }
 
 - (void)testCmdInfoShowsCapacity {
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdInfo(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdInfo(NULL); });
 
-    XCTAssert(strstr(outBuf, "TB") != NULL, @"Should show capacity in TB");
+    XCTAssert([out containsString:@"TB"], @"Should show capacity in TB");
 }
 
 - (void)testCmdInfoShowsPort {
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdInfo(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdInfo(NULL); });
 
-    XCTAssert(strstr(outBuf, "USB3.0") != NULL, @"Should show USB interface");
+    XCTAssert([out containsString:@"USB3.0"], @"Should show USB interface");
 }
 
 // MARK: - Secure Erase (confirm guard only)
@@ -981,7 +1000,255 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     XCTAssert([out containsString:@"[scsi] CDB: 1D 20"], @"%@", out);
 }
 
+// MARK: - Argument Parsing (WDArgs.m)
+
+- (void)testParseDefaultsToSmart {
+    WDParsedArgs a; const char *argv[] = {"wd_smart"};
+    XCTAssertEqual(WDParseArgs(1, argv, &a), kWDActionRun);
+    XCTAssertEqual(strcmp(a.cmdName, "smart"), 0);
+    XCTAssertEqual(a.deviceIndex, -1);
+    XCTAssertEqual(a.restc, 2);
+    XCTAssert(a.rest[2] == NULL);
+}
+
+- (void)testParseDiskBeforeCommand {
+    WDParsedArgs a; const char *argv[] = {"wd_smart", "--disk", "2", "sleep", "30"};
+    XCTAssertEqual(WDParseArgs(5, argv, &a), kWDActionRun);
+    XCTAssertEqual(a.deviceIndex, 2);
+    XCTAssertEqual(strcmp(a.cmdName, "sleep"), 0);
+    XCTAssertEqual(strcmp(a.arg1, "30"), 0);
+}
+
+- (void)testParseDiskAfterCommandIsHonored {
+    // Regression: previously `erase --confirm --disk 1` silently targeted disk 0
+    WDParsedArgs a; const char *argv[] = {"wd_smart", "erase", "--confirm", "--disk", "1"};
+    XCTAssertEqual(WDParseArgs(5, argv, &a), kWDActionRun);
+    XCTAssertEqual(a.deviceIndex, 1);
+    XCTAssertEqual(a.confirm, 1);
+    XCTAssert(WDHasConfirmFlag(a.restc, a.rest));
+}
+
+- (void)testParseDiskEqualsForm {
+    WDParsedArgs a; const char *argv[] = {"wd_smart", "info", "--disk=3"};
+    XCTAssertEqual(WDParseArgs(3, argv, &a), kWDActionRun);
+    XCTAssertEqual(a.deviceIndex, 3);
+}
+
+- (void)testParseDiskNeverBecomesPassword {
+    // Regression: previously `unlock --disk 1` used "--disk" as the password
+    WDParsedArgs a; const char *argv[] = {"wd_smart", "unlock", "--disk", "1"};
+    XCTAssertEqual(WDParseArgs(4, argv, &a), kWDActionRun);
+    XCTAssertEqual(a.deviceIndex, 1);
+    XCTAssert(a.arg1 == NULL, @"no positional args remain");
+    XCTAssertEqual(a.restc, 2);
+}
+
+- (void)testParseVerboseAnywhere {
+    WDParsedArgs a; const char *argv[] = {"wd_smart", "smart", "-v"};
+    XCTAssertEqual(WDParseArgs(3, argv, &a), kWDActionRun);
+    XCTAssertEqual(a.verbose, 1);
+    const char *argv2[] = {"wd_smart", "--verbose", "smart"};
+    XCTAssertEqual(WDParseArgs(3, argv2, &a), kWDActionRun);
+    XCTAssertEqual(a.verbose, 1);
+}
+
+- (void)testParseConfirmBeforeCommand {
+    WDParsedArgs a; const char *argv[] = {"wd_smart", "--confirm", "erase"};
+    XCTAssertEqual(WDParseArgs(3, argv, &a), kWDActionRun);
+    XCTAssertEqual(strcmp(a.cmdName, "erase"), 0);
+    XCTAssert(WDHasConfirmFlag(a.restc, a.rest));
+    XCTAssertEqual(strcmp(a.rest[a.restc - 1], "--confirm"), 0, @"--confirm appended after command");
+}
+
+- (void)testParseHelpForms {
+    WDParsedArgs a;
+    const char *h1[] = {"wd_smart", "-h"};       XCTAssertEqual(WDParseArgs(2, h1, &a), kWDActionHelp);
+    const char *h2[] = {"wd_smart", "--help"};   XCTAssertEqual(WDParseArgs(2, h2, &a), kWDActionHelp);
+    const char *h3[] = {"wd_smart", "help"};     XCTAssertEqual(WDParseArgs(2, h3, &a), kWDActionHelp);
+    const char *h4[] = {"wd_smart", "smart", "-h"}; XCTAssertEqual(WDParseArgs(3, h4, &a), kWDActionHelp);
+}
+
+- (void)testParseUsageErrors {
+    WDParsedArgs a;
+    const char *e1[] = {"wd_smart", "--disk"};
+    XCTAssertEqual(WDParseArgs(2, e1, &a), kWDActionUsageError);
+    XCTAssert(strstr(a.error, "requires an index"));
+
+    const char *e2[] = {"wd_smart", "--disk", "x", "info"};
+    XCTAssertEqual(WDParseArgs(4, e2, &a), kWDActionUsageError);
+    XCTAssert(strstr(a.error, "invalid --disk"));
+
+    const char *e3[] = {"wd_smart", "--disk", "64"};
+    XCTAssertEqual(WDParseArgs(3, e3, &a), kWDActionUsageError);
+
+    const char *e4[] = {"wd_smart", "--bogus", "smart"};
+    XCTAssertEqual(WDParseArgs(3, e4, &a), kWDActionUsageError);
+    XCTAssert(strstr(a.error, "unknown option"));
+
+    const char *e5[] = {"wd_smart", "frobnicate"};
+    XCTAssertEqual(WDParseArgs(2, e5, &a), kWDActionUsageError);
+    XCTAssert(strstr(a.error, "unknown command"));
+}
+
+- (void)testParseDestructiveRejectsPositionalArgs {
+    // A typo'd option must never be swallowed by a destructive command
+    WDParsedArgs a; const char *argv[] = {"wd_smart", "erase", "-confirm"};
+    XCTAssertEqual(WDParseArgs(3, argv, &a), kWDActionUsageError);
+    const char *argv2[] = {"wd_smart", "reset-dek", "--confirm", "now"};
+    XCTAssertEqual(WDParseArgs(4, argv2, &a), kWDActionUsageError);
+    XCTAssert(strstr(a.error, "takes no arguments"));
+}
+
+- (void)testParseTooManyArgs {
+    WDParsedArgs a;
+    const char *argv[kWDMaxArgs + 4];
+    argv[0] = "wd_smart"; argv[1] = "sleep";
+    for (int i = 2; i < kWDMaxArgs + 4; i++) argv[i] = "x";
+    XCTAssertEqual(WDParseArgs(kWDMaxArgs + 4, argv, &a), kWDActionUsageError);
+    XCTAssert(strstr(a.error, "too many"));
+}
+
+- (void)testParseRestShapeMatchesCommandExpectations {
+    // rest[] must be {prog, cmd, positional..., "--confirm"?, NULL} with argOffset=1
+    WDParsedArgs a; const char *argv[] = {"wd_smart", "--disk", "0", "set-password", "hunter2"};
+    XCTAssertEqual(WDParseArgs(5, argv, &a), kWDActionRun);
+    XCTAssertEqual(a.restc, 3);
+    XCTAssertEqual(strcmp(a.rest[1], "set-password"), 0);
+    XCTAssertEqual(strcmp(a.rest[2], "hunter2"), 0);
+    XCTAssert(a.rest[3] == NULL);
+}
+
+- (void)testEveryCommandInTableIsFindable {
+    for (int i = 0; i < kWDCommandCount; i++) {
+        const WDCommandSpec *s = WDFindCommand(kWDCommands[i].name);
+        XCTAssert(s == &kWDCommands[i]);
+        if (s->destructive) XCTAssertEqual(strcmp(s->args, "--confirm"), 0, @"%s", s->name);
+    }
+    XCTAssert(WDFindCommand("probe") != NULL);
+    XCTAssert(WDFindCommand(NULL) == NULL);
+}
+
+// MARK: - Sense String Branches
+
+- (void)testLastErrorStringStatusWithoutSense {
+    g_lastSense = (WDScsiSense){ .valid = YES, .taskStatus = 0x08 };
+    XCTAssert(strstr(WDScsiLastErrorString(), "SCSI status 08 (BUSY), no sense data"), @"%s", WDScsiLastErrorString());
+    g_lastSense = (WDScsiSense){ .valid = YES, .taskStatus = 0x05 };
+    XCTAssert(strstr(WDScsiLastErrorString(), "status 05 (unknown)"));
+}
+
+- (void)testLastErrorStringUnknownASC {
+    g_lastSense = (WDScsiSense){ .valid = YES, .taskStatus = 0x02, .senseKey = 0x03, .asc = 0x11 };
+    const char *s = WDScsiLastErrorString();
+    XCTAssert(strstr(s, "sense 03/11/00 (Medium Error)"), @"%s", s);
+    XCTAssertFalse(strstr(s, "status"), @"CHECK CONDITION is the expected status; don't append it");
+}
+
+- (void)testLastErrorStringAppendsOddStatusWithSense {
+    // Sense present but status isn't CHECK CONDITION -> must not hide the status
+    g_lastSense = (WDScsiSense){ .valid = YES, .taskStatus = 0x05, .senseKey = 0x02, .asc = 0x04, .ascq = 0x01 };
+    XCTAssert(strstr(WDScsiLastErrorString(), ", status 05"), @"%s", WDScsiLastErrorString());
+}
+
+- (void)testSenseKeyNames {
+    XCTAssertEqual(strcmp(WDScsiSenseKeyName(0x05), "Illegal Request"), 0);
+    XCTAssertEqual(strcmp(WDScsiSenseKeyName(0x04), "Hardware Error"), 0);
+    XCTAssertEqual(strcmp(WDScsiSenseKeyName(0xF5), "Illegal Request"), 0, @"masks to low nibble");
+    XCTAssertEqual(strcmp(WDScsiSenseKeyName(0x0C), "Reserved"), 0);
+}
+
+// MARK: - Serial Decode
+
+- (void)testDecodeSerialHex {
+    XCTAssertEqualObjects(WDDecodeSerial(@"575836314141334A39313236"), @"WX61AA3J9126");
+    XCTAssertEqualObjects(WDDecodeSerial(@"5758"), @"WX");
+    XCTAssertEqualObjects(WDDecodeSerial(@"57"), @"W");
+}
+
+- (void)testDecodeSerialPassthrough {
+    XCTAssertEqualObjects(WDDecodeSerial(@"WX61AA3J9126"), @"WX61AA3J9126", @"not hex");
+    XCTAssertEqualObjects(WDDecodeSerial(@"575"), @"575", @"odd length");
+    XCTAssertEqualObjects(WDDecodeSerial(@"0001"), @"0001", @"non-printable");
+    XCTAssertEqualObjects(WDDecodeSerial(@""), @"");
+    XCTAssert(WDDecodeSerial(nil) == nil);
+}
+
+// MARK: - Password Prompt Path
+
+- (void)testMissingPasswordReportsAndSendsNothing {
+    static const char *argv[] = {"wd_smart", "set-password"};
+    g_mock.recordCount = 0;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdSetPassword(NULL, 2, argv, 1), kWDExitUsage); });
+    XCTAssert([out containsString:@"No password provided"], @"%@", out);
+    XCTAssertEqual(g_mock.recordCount, 0);
+}
+
+- (void)testPasswordLengthCountsCharactersNotBytes {
+    // 20 x U+00E9 (2 bytes each in UTF-8 = 40 bytes) must be accepted
+    static char pw[64];
+    for (int i = 0; i < 20; i++) { pw[i*2] = (char)0xC3; pw[i*2+1] = (char)0xA9; }
+    pw[40] = 0;
+    static const char *argv[] = {"wd_smart", "set-password", pw};
+    XCTAssertEqual(WDCmdSetPassword(NULL, 3, argv, 1), kWDExitOK);
+}
+
+// MARK: - Reset DEK cipher 0x28
+
+- (void)testResetDEKPageLayoutAES256XTS {
+    g_mock.encryptStatus[4] = 0x28;
+    const char *argv[] = {"wd_smart", "reset-dek", "--confirm"};
+    WDCmdResetDEK(NULL, 3, argv);
+    MockSCSIRecord *r = findRecord(0xC1, 0xE3);
+    XCTAssert(r != NULL);
+    XCTAssertEqual(r->data[4], 0x28);
+    XCTAssertEqual(r->data[6], 1);
+    XCTAssertEqual(r->cdb[8], 0x28);
+}
+
+// MARK: - Read-back verification: cannot verify
+
+- (void)testSleepReportsFailureWhenReadbackUnavailable {
+    // MODE SELECT says GOOD but the read-back MODE SENSE fails: we cannot claim
+    // success on a bridge whose status is known to be unreliable.
+    g_mock.modeSenseFailsAfterSelect = YES;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdSleep(NULL, "15"), kWDExitFailure); });
+    XCTAssert([out containsString:@"Could not verify sleep timer"], @"%@", out);
+    XCTAssertFalse([out containsString:@"set to 15"]);
+}
+
+- (void)testLEDReportsFailureWhenReadbackUnavailable {
+    g_mock.modeSenseFailsAfterSelect = YES;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdLED(NULL, "off"), kWDExitFailure); });
+    XCTAssert([out containsString:@"Could not verify LED"], @"%@", out);
+}
+
+- (void)testSleepMismatchShowsOriginalModeSelectSense {
+    // Regression (review H2): after read-back, the MODE SELECT sense was lost and
+    // the error said "OK (44 bytes)". The original sense must be reported.
+    g_mock.modeSelectIgnored = YES;
+    g_mock.modeSelectLies = YES; g_mock.modeSelectStatus = 0x02;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdSleep(NULL, "55"), kWDExitFailure); });
+    XCTAssert([out containsString:@"not applied"], @"%@", out);
+    XCTAssert([out containsString:@"MODE SELECT: sense 02/04/01"], @"%@", out);
+    XCTAssertFalse([out containsString:@"OK ("], @"must not print the read-back's success as the error");
+}
+
 // MARK: - Probe
+
+- (void)testProbeDecodesSupportedPageLists {
+    NSString *out = captureOutput(NO, ^{ WDCmdProbe(NULL); });
+    XCTAssert([out containsString:@"supported VPD pages: 00 80 83 C1 C2"], @"%@", out);
+    XCTAssert([out containsString:@"supported diag pages: 00 08 80 83 84 85"], @"%@", out);
+}
+
+- (void)testProbeDiagnosisWithoutBridgeFault {
+    // Everything but INQUIRY fails with 'unsupported' (not 04/44): still a
+    // diagnosis, but without the internal-target-failure attribution.
+    g_mock.failExceptInquiry = YES;
+    NSString *out = captureOutput(NO, ^{ XCTAssertEqual(WDCmdProbe(NULL), kWDExitFailure); });
+    XCTAssert([out containsString:@"DIAGNOSIS"], @"%@", out);
+    XCTAssertFalse([out containsString:@"04/44/xx"], @"%@", out);
+}
 
 - (void)testProbeHealthyDrive {
     NSString *out = captureOutput(NO, ^{ XCTAssertEqual(WDCmdProbe(NULL), kWDExitOK); });
@@ -1045,13 +1312,24 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     XCTAssert([out containsString:@"Serial:   WX61AA3J9126\n"], @"%@", out);
 }
 
+- (void)testInfoFallsBackToDiag83WhenSignatureWrong {
+    // C0/45 returns GOOD but without the 0x45 signature -> use diag page 0x83
+    g_mock.encryptStatus[0] = 0x00;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdInfo(NULL), kWDExitOK); });
+    XCTAssert([out containsString:@"Encrypt:  Off\n"], @"fallback has no cipher suffix: %@", out);
+    BOOL sent83 = NO;
+    for (int i = 0; i < g_mock.recordCount; i++)
+        if (g_mock.records[i].opcode == 0x1C && g_mock.records[i].cdb[2] == 0x83) sent83 = YES;
+    XCTAssertTrue(sent83);
+}
+
 - (void)testInfoReportsEncryptionUnavailable {
-    // Both 0xC0/45 and diag 0x83 fail → must say so, not silently omit
-    g_mock.encryptStatus[0] = 0x00;   // bad signature → falls back to 0x83, which mock zero-fills
-    // make 0x1C page 0x83 fail by failing everything except what info needs is complex;
-    // instead verify the successful path prints and a failed vendor cmd is reported via stderr
-    NSString *out = captureOutput(YES, ^{ WDCmdInfo(NULL); });
-    XCTAssert([out containsString:@"Encrypt:"], @"%@", out);
+    // Both C0/45 (bad signature) and diag 0x83 (unsupported) fail -> say so and exit 1
+    g_mock.encryptStatus[0] = 0x00;
+    g_mock.diag83Unsupported = YES;
+    NSString *out = captureOutput(YES, ^{ XCTAssertEqual(WDCmdInfo(NULL), kWDExitFailure); });
+    XCTAssert([out containsString:@"Encrypt:  unavailable"], @"%@", out);
+    XCTAssert([out containsString:@"OK (48 bytes)"], @"first error (sig mismatch after GOOD) echoed: %@", out);
 }
 
 // MARK: - Bridge lies about MODE SELECT status (Passport 0748 quirk)
@@ -1111,15 +1389,23 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 }
 
 - (void)testSleepClampsParamLenToBuffer {
-    // Bridge reports absurd page length; MODE SELECT must not send > 44 bytes
+    // Bridge reports absurd page length; MODE SELECT must send exactly the buffer size
     g_mock.modePage[5] = 0xF0;
     g_mock.recordCount = 0;
-    WDCmdSleep(NULL, "15");
-    MockSCSIRecord *r = NULL;
-    for (int i = 0; i < g_mock.recordCount; i++)
-        if (g_mock.records[i].opcode == 0x15) r = &g_mock.records[i];
+    XCTAssertEqual(WDCmdSleep(NULL, "15"), kWDExitOK);
+    MockSCSIRecord *r = findRecord(0x15, -1);
     XCTAssert(r != NULL);
-    XCTAssertLessThanOrEqual(r->dataSize, (UInt32)44);
+    XCTAssertEqual(r->dataSize, (UInt32)44);
+}
+
+- (void)testSleepClampsParamLenToMinimum {
+    // Tiny page length must still include the timer bytes (>= 16)
+    g_mock.modePage[5] = 0x02;
+    g_mock.recordCount = 0;
+    XCTAssertEqual(WDCmdSleep(NULL, "15"), kWDExitOK);
+    MockSCSIRecord *r = findRecord(0x15, -1);
+    XCTAssert(r != NULL);
+    XCTAssertEqual(r->dataSize, (UInt32)16);
 }
 
 - (void)testSleepRejectsWrongPage {
@@ -1128,8 +1414,14 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
 }
 
 - (void)testStatusClampsPageLen {
+    // Bridge claims 65535 bytes; we must clamp to 20 entries and print only the
+    // one non-empty fixture row (no garbage rows from beyond the buffer).
     g_mock.selfTestLog[2] = 0xFF; g_mock.selfTestLog[3] = 0xFF;
-    XCTAssertEqual(WDCmdStatus(NULL), kWDExitOK);   // must not over-read
+    NSString *out = captureOutput(NO, ^{ XCTAssertEqual(WDCmdStatus(NULL), kWDExitOK); });
+    NSArray *lines = [out componentsSeparatedByString:@"\n"];
+    NSUInteger dataRows = 0;
+    for (NSString *l in lines) if ([l hasPrefix:@"1 "] || [l rangeOfString:@"Short"].location != NSNotFound) dataRows++;
+    XCTAssertEqual(dataRows, (NSUInteger)1, @"%@", out);
 }
 
 - (void)testCookPasswordRejectsInvalidUTF8 {
@@ -1249,16 +1541,11 @@ static WDDriveIdentity mockDriveIdentity(const char *targetSerial) {
     entry2[5] = 2; entry2[6] = 0; entry2[7] = 200;
     entry2[15] = 0x42; // LBA low byte
 
-    char outBuf[4096] = {0};
-    fflush(stdout);
-    FILE *old = stdout;
-    stdout = fmemopen(outBuf, sizeof(outBuf), "w");
-    WDCmdStatus(NULL);
-    fflush(stdout); fclose(stdout); stdout = old;
+    NSString *out = captureOutput(NO, ^{ WDCmdStatus(NULL); });
 
-    XCTAssert(strstr(outBuf, "Read fail") != NULL);
-    XCTAssert(strstr(outBuf, "Extended") != NULL);
-    XCTAssert(strstr(outBuf, "66") != NULL, @"Should show LBA 0x42=66");
+    XCTAssert([out containsString:@"Read fail"]);
+    XCTAssert([out containsString:@"Extended"]);
+    XCTAssert([out containsString:@"66"], @"Should show LBA 0x42=66");
 }
 
 @end

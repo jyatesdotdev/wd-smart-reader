@@ -2,13 +2,13 @@
 
 ## Overview
 
-`wd_smart` is a small macOS CLI (~1500 lines of Objective-C across five source
+`wd_smart` is a small macOS CLI (~2100 lines of Objective-C across six source
 files) that communicates with Western Digital external drives through the WD
 USB bridge's SES (SCSI Enclosure Services) interface.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                    CLI (src/main.m)                       │
+│              CLI (src/main.m + src/WDArgs.m)              │
 │  command table, option parsing, exit-code propagation    │
 ├──────────────────────────────────────────────────────────┤
 │           Commands (WDCommands.m, WDEncryption.m)         │
@@ -51,9 +51,10 @@ src/
   WDCommands.m     — SMART decoding, info, temp, status, sleep, LED, probe, power,
                      erase, secure-erase, password prompt helper
   WDEncryption.m   — Password cooking (SHA-256) and arm/unlock/disarm/reset-DEK
-  main.m           — Command table, option parsing, dispatch
-wd_smart_tests.m   — 81 XCTest cases against a mock WD drive (built with -DTESTING)
-Makefile           — build, test, coverage, install
+  WDArgs.m         — Command table (kWDCommands) and WDParseArgs(); no I/O, fully unit-tested
+  main.m           — Usage text and dispatch only
+wd_smart_tests.m   — 123 XCTest cases against a mock WD drive (built with -DTESTING)
+Makefile           — build, test, test-asan, coverage, install
 AGENTS.md          — Protocol reference and per-drive findings
 ```
 
@@ -106,6 +107,26 @@ operate on the drive the user selected — not whichever WD disk IOKit
 enumerates first.
 
 `list` pairs disk↔SES the same way (by parent ID), not by enumeration order.
+
+### Argument parsing is a pure function
+
+`WDParseArgs()` turns `argv` into a `WDParsedArgs` struct: options (`--disk N`,
+`--disk=N`, `-v`, `--confirm`, `-h`) are recognised **anywhere** on the line,
+the first non-option word is the command, and remaining words are positional
+args. Destructive commands reject any positional arg, so a mistyped option
+(`-confirm`, `--disk` after the command) can never be silently swallowed as a
+password or ignored. `main()` only prints usage and dispatches. This exists
+because an earlier version parsed options only *before* the command word, so
+`erase --confirm --disk 1` targeted drive 0.
+
+### Writes are verified by read-back
+
+The Passport 0748 bridge commits MODE SELECT writes but returns a bogus status
+(`0x05`, `02/04/01`, `04/00/00`). `WDCmdSleep` and `WDCmdLED` therefore ignore
+the MODE SELECT return code and re-read the page: match → success; mismatch →
+failure with the *original* MODE SELECT sense (snapshotted before the read-back
+overwrites `g_lastSense`); read-back unavailable → failure ("could not
+verify"), never an optimistic exit 0.
 
 ### Exit codes
 
@@ -165,19 +186,34 @@ triple) to reproduce field failures such as the `04/44/81` bridge fault.
 
 ### What's tested
 
+- Argument parsing: every option form and position, usage errors, destructive
+  commands rejecting positional args, the `rest[]` shape commands rely on
 - All encryption flows, password cooking, Handy Store initialisation, UTF-8
-  validation, page layouts for every reset-DEK cipher branch
-- SMART/self-test/temperature/sleep/LED/info decoding and formatting
-- Bounds: VPD 0xC1 port clamping, MODE SELECT length clamping, LOG SENSE
-  page-length clamping, wrong-page detection
-- Exit codes and sense reporting for every command
-- `--confirm` guards and root requirement for secure-erase
-- `probe` diagnosis logic
+  validation, character-vs-byte length, page layouts for every reset-DEK cipher
+- SMART/self-test/temperature (including the 0x86 thermal page)/sleep/LED/info
+  decoding and formatting, encryption-status fallback and "unavailable" paths
+- Bounds: VPD 0xC1 port clamping, MODE SELECT length clamping (both ends),
+  LOG SENSE page-length clamping, wrong-page detection — also run under ASan
+- Bridge quirks: committed-but-reported-failed writes, genuinely dropped
+  writes, read-back unavailable, original sense preserved on mismatch
+- Sense string rendering for every branch; serial hex decoding
+- Exit codes and sense reporting for every command; CDB bytes for self-test
+  codes and power-off page
+- `--confirm` guards (exact match, any position) and root requirement for
+  secure-erase; erase label derivation and fallback
+- `probe` page-list decoding and both diagnosis variants
+
+Tests use `open_memstream` for output capture (no silent truncation) and
+restore `stdout`/`stderr` in `@finally` so a throwing test cannot poison the
+rest of the run. `make test-asan` runs the same suite under
+AddressSanitizer + UBSan.
 
 ### What's not tested (IOKit adapter)
 
-`WDDevice.m` (open/list/bind/BSD-name) and `WDExecSCSITaskReal` require real
-hardware. They contain no business logic beyond registry traversal.
+`WDDevice.m` (open/list/bind/BSD-name/unmount) and `WDExecSCSITaskReal`
+require real hardware. They contain no business logic beyond registry
+traversal; the two pure helpers that live there (`WDRegistryString` is
+IOKit-bound, but `WDDecodeSerial` is not) are exported and tested.
 
 ## Dependencies
 

@@ -17,12 +17,12 @@ This tool takes a different approach: instead of trying to pass ATA commands thr
 The result is a pure userspace CLI tool that:
 - Works on Apple Silicon (no kext required)
 - Requires no third-party dependencies
-- Provides SMART data, self-tests, temperature, drive info, sleep timer, and erase
+- Provides SMART data, self-tests, temperature, drive info, sleep timer, LED control, encryption (set/unlock/remove password, reset DEK), power-off, a bridge capability probe, and erase
 - Runs on any modern macOS version
 
 ## Dependencies
 
-None beyond Xcode Command Line Tools. Uses only macOS system frameworks (Foundation, IOKit, CoreFoundation). Does not require WD Drive Utilities.
+None beyond Xcode Command Line Tools. Uses only macOS system frameworks (Foundation, IOKit, CoreFoundation, DiskArbitration). Does not require WD Drive Utilities.
 
 ```bash
 xcode-select --install  # if not already installed
@@ -37,7 +37,8 @@ make
 ## Test
 
 ```bash
-make test       # run 81 unit tests against a mock drive (never touches hardware)
+make test       # run 123 unit tests against a mock drive (never touches hardware)
+make test-asan  # same tests under AddressSanitizer/UBSan
 make coverage   # run tests with llvm-cov coverage report
 ```
 
@@ -61,16 +62,16 @@ see "Cannot get exclusive access", and always for `secure-erase` (it writes to
 | `long-test` | Start extended self-test (hours) |
 | `abort-test` | Abort a running self-test |
 | `status` | Show self-test results log |
-| `temp` | Show drive temperature |
+| `temp` | Show drive temperature and fan status |
 | `sleep [MIN]` | Get or set sleep timer (0 = disable) |
 | `led [on\|off]` | Get or set drive LED |
-| `power-off` | Safely spin down and power off drive |
+| `power-off` | Unmount, spin down and power off drive |
 | `probe` | Show which SCSI pages/commands this bridge supports, with diagnosis |
 | `set-password [PW]` | Enable drive encryption (locks on power cycle); prompts if omitted |
 | `unlock [PW]` | Unlock a locked drive; prompts if omitted |
 | `remove-password [PW]` | Disable encryption (requires current password) |
-| `reset-dek` | Reset encryption key — **destroys all data** |
-| `erase` | Quick format via WD bridge (requires `--confirm`) |
+| `reset-dek` | Reset encryption key — **destroys all data** (requires `--confirm`) |
+| `erase` | Quick format as ExFAT via `diskutil eraseDisk` (requires `--confirm`) |
 | `secure-erase` | Zero-fill every sector (requires `--confirm`) |
 | `list` | List connected WD drives |
 
@@ -80,7 +81,10 @@ see "Cannot get exclusive access", and always for `secure-erase` (it writes to
 |--------|-------------|
 | `--disk N` | Select drive by index (see `list`). Binds `info`/`erase`/`secure-erase` to that enclosure. |
 | `-v`, `--verbose` | Log every SCSI CDB and its sense result to stderr |
+| `--confirm` | Required by `erase`, `secure-erase`, `reset-dek` |
 | `-h`, `--help` | Show usage |
+
+Options are accepted anywhere on the command line. Destructive commands accept no other arguments, so a mistyped option is rejected rather than silently ignored.
 
 ### Exit Codes
 
@@ -102,14 +106,14 @@ see "Cannot get exclusive access", and always for `secure-erase` (it writes to
 ### Examples
 
 ```bash
-sudo ./wd_smart                # show SMART attributes
-sudo ./wd_smart info           # drive identity and specs
-sudo ./wd_smart short-test     # kick off a quick test
-sudo ./wd_smart status         # check test progress/results
-sudo ./wd_smart temp           # current drive temperature
-sudo ./wd_smart sleep 30       # spin down after 30 min idle
-sudo ./wd_smart sleep 0        # disable sleep timer
-sudo ./wd_smart power-off      # safe eject / power off
+./wd_smart                     # show SMART attributes
+./wd_smart info                # drive identity and specs
+./wd_smart short-test          # kick off a quick test
+./wd_smart status              # check test progress/results
+./wd_smart temp                # current drive temperature
+./wd_smart sleep 30            # spin down after 30 min idle
+./wd_smart sleep 0             # disable sleep timer (some bridges enforce a minimum)
+./wd_smart power-off           # unmount, then safe power off
 
 # Diagnostics
 ./wd_smart probe               # which pages does this bridge support?
@@ -119,11 +123,11 @@ sudo ./wd_smart power-off      # safe eject / power off
 ./wd_smart set-password                       # prompts: New password:
 ./wd_smart unlock                             # prompts: Password:
 ./wd_smart remove-password "mypassword"       # or pass it on the command line
-sudo ./wd_smart reset-dek --confirm           # nuke encryption key (DATA LOSS)
+./wd_smart reset-dek --confirm                # nuke encryption key (DATA LOSS)
 
 # Destructive
-sudo ./wd_smart erase --confirm        # quick format (bridge-level)
-sudo ./wd_smart secure-erase --confirm # full zero-fill (20+ hrs on 18TB)
+./wd_smart erase --confirm             # quick format (diskutil eraseDisk ExFAT)
+sudo ./wd_smart secure-erase --confirm # full zero-fill (20-30 hrs on 18TB); root required
 ```
 
 ## Install (optional)
@@ -150,20 +154,24 @@ src/
   WDSmart.h          — Shared header (types, constants, declarations)
   WDScsi.m           — SCSI transport, sense capture/decoding, command wrappers
   WDDevice.m         — IOKit discovery, enclosure binding for --disk, list
-  WDCommands.m       — SMART parsing, info, temp, sleep, LED, probe, self-test, erase
+  WDCommands.m       — SMART parsing, info, temp, sleep, LED, probe, self-test, power-off, erase
   WDEncryption.m     — Password cooking and encryption commands
-  main.m             — CLI entry point
-wd_smart_tests.m    — 81 unit tests with mock WD drive emulator (built with -DTESTING)
-Makefile            — Build, test, coverage, install
+  WDArgs.m           — Command table and argument parsing (unit-tested)
+  main.m             — CLI entry point (usage + dispatch only)
+wd_smart_tests.m    — 123 unit tests with mock WD drive emulator (built with -DTESTING)
+Makefile            — Build, test, test-asan, coverage, install
 ARCHITECTURE.md     — Design decisions and testing strategy
-AGENTS.md           — Protocol reference and development notes
+AGENTS.md           — Protocol reference, per-drive findings, development notes
+TROUBLESHOOTING.md  — Sense-code table and failure playbooks
+GUIDE.md            — User guide: reading SMART output, self-tests, monitoring
+ghidra_decompiled.txt — Decompiled WD Drive Utilities routines the protocol was derived from
 ```
 
 ## Compatibility
 
 - macOS (tested on Apple Silicon, arm64)
 - WD MyBook, Elements, and other WD USB enclosures with SES interface
-- Requires root (sudo) for IOKit SCSI exclusive access
+- Runs as an admin user; `sudo` only for `secure-erase` (raw device write) or if exclusive access is denied
 
 ## License
 
