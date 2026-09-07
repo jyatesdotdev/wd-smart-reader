@@ -5,3 +5,4 @@ wd_smart_tests_cov
 *.profdata
 .DS_Store
 *.o
+*.dSYM
